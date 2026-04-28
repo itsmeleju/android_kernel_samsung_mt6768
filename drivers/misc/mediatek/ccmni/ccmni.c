@@ -1593,8 +1593,26 @@ static int ccmni_rx_callback(int md_id, int ccmni_idx, struct sk_buff *skb,
 		return -1;
 	}
 
-	ccmni = ctlb->ccmni_inst[ccmni_idx];
+ccmni = ctlb->ccmni_inst[ccmni_idx];
 	dev = ccmni->dev;
+
+	/*
+	 * MT6768 VoLTE fix: Prevent IMS packet drops during CA transitions.
+	 * When LTE Carrier Aggregation toggles, netif_stop_queue(dev) is called.
+	 * For the IMS interface (ccmni1), we bypass the queue check and 
+	 * use netif_rx() to ensure the SIP ACK/200 OK reaches the stack.
+	 */
+	if (netif_queue_stopped(dev)) {
+		if (ccmni_idx == 1 || (dev->name && strstr(dev->name, "ccmni1"))) {
+			/* Push to CPU backlog instead of dropping */
+			netif_rx(skb);
+			return 0; 
+		}
+		
+		/* Standard drop for non-IMS traffic when queue is stopped */
+		dev_kfree_skb(skb);
+		return -ENODEV;
+	}
 
 	pkt_type = skb->data[0] & 0xF0;
 
