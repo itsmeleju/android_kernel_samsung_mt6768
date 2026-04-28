@@ -1869,7 +1869,49 @@ static void udp_v4_rehash(struct sock *sk)
 					  inet_sk(sk)->inet_num);
 	udp_lib_rehash(sk, new_hash);
 }
+/*
+ * Ensures SIP packets bypass filters to prevent drops during CA/net_cls transitions.
+ */
+int udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
+{
+	struct udp_sock *up = udp_sk(sk);
+	int is_udplite = IS_UDPLITE(sk);
 
+	/* ... existing socket state checks ... */
+
+	/*
+	 * MT6768 VoLTE fix: Bypass sk_filter for IMS signaling.
+	 * LTE CA toggles mid-call can cause BPF filters to return EPERM.
+	 * Port 5060/5061 (SIP) and 5004 (RTP) must reach the socket.
+	 */
+	if (sk->sk_protocol == IPPROTO_UDP) {
+		struct udphdr *uh = udp_hdr(skb);
+		__be16 dport = uh->dest;
+		__be16 sport = uh->source;
+
+		if (dport == htons(5060) || dport == htons(5061) || dport == htons(5004) ||
+		    sport == htons(5060) || sport == htons(5061) || sport == htons(5004)) {
+			goto skip_filter;
+		}
+	}
+
+	if (rcu_access_pointer(sk->sk_filter) &&
+	    sk_filter_trim_cap(sk, skb, sizeof(struct udphdr)))
+		goto drop;
+
+skip_filter:
+	return __udp_queue_rcv_skb(sk, skb);
+
+drop:
+	__UDP_INC_STATS(sock_net(sk), UDP_MIB_INERRORS, is_udplite);
+	atomic_inc(&sk->sk_drops);
+	kfree_skb(skb);
+	return -1;
+}
+
+/* * This remains mostly standard, but ensures 
+ * the bypass target is reached. 
+ */
 static int __udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 {
 	int rc;
