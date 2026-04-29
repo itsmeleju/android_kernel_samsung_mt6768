@@ -1593,7 +1593,7 @@ static int ccmni_rx_callback(int md_id, int ccmni_idx, struct sk_buff *skb,
 		return -1;
 	}
 
-ccmni = ctlb->ccmni_inst[ccmni_idx];
+	ccmni = ctlb->ccmni_inst[ccmni_idx];
 	dev = ccmni->dev;
 
 	/*
@@ -1603,17 +1603,26 @@ ccmni = ctlb->ccmni_inst[ccmni_idx];
 	 * use netif_rx() to ensure the SIP ACK/200 OK reaches the stack.
 	 */
 	if (netif_queue_stopped(dev)) {
-		if (ccmni_idx == 1 || (dev->name && strstr(dev->name, "ccmni1"))) {
-			/* Push to CPU backlog instead of dropping */
-			netif_rx(skb);
-			return 0; 
-		}
-		
-		/* Standard drop for non-IMS traffic when queue is stopped */
-		dev_kfree_skb(skb);
-		return -ENODEV;
-	}
-
+    /* 1. Verify the device hasn't been detached or shut down completely */
+    if (!netif_running(dev) || !netif_device_present(dev)) {
+        dev_kfree_skb(skb);
+        return -ENODEV;
+    }
+    /* 2. Target only the IMS interface */
+    if (ccmni_idx == 1 || (dev->name && !strcmp(dev->name, "ccmni1"))) {
+        /* 
+         * Instead of just skipping, we check if there is physically 
+         * room in the hardware ring. If the HW is totally full, 
+         * skipping the check will cause a crash.
+         */
+        if (ccmni_hw_has_space(dev)) { // Hypothetical check: verify HW availability
+             goto skip_queue_check;
+        }
+    }
+    dev_kfree_skb(skb);
+    return -ENODEV;
+}
+/*Nothing below is editted only changed above lines */
 	pkt_type = skb->data[0] & 0xF0;
 
 	skb_reset_transport_header(skb);
