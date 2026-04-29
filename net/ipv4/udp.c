@@ -1876,9 +1876,6 @@ int udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 {
 	struct udp_sock *up = udp_sk(sk);
 	int is_udplite = IS_UDPLITE(sk);
-
-	/* ... existing socket state checks ... */
-
 	/*
 	 * MT6768 VoLTE fix: Bypass sk_filter for IMS signaling.
 	 * LTE CA toggles mid-call can cause BPF filters to return EPERM.
@@ -1908,7 +1905,6 @@ drop:
 	kfree_skb(skb);
 	return -1;
 }
-
 /* * This remains mostly standard, but ensures 
  * the bypass target is reached. 
  */
