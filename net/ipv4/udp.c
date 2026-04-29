@@ -1874,8 +1874,8 @@ static void udp_v4_rehash(struct sock *sk)
  */
 int udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 {
-	struct udp_sock *up = udp_sk(sk);
-	int is_udplite = IS_UDPLITE(sk);
+	struct sk_buff *next, *segs;
+	int ret;
 	/*
 	 * MT6768 VoLTE fix: Bypass sk_filter for IMS signaling.
 	 * LTE CA toggles mid-call can cause BPF filters to return EPERM.
@@ -1892,18 +1892,37 @@ int udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 		}
 	}
 
-	if (rcu_access_pointer(sk->sk_filter) &&
-	    sk_filter_trim_cap(sk, skb, sizeof(struct udphdr)))
-		goto drop;
+	/* GSO/Segment handling */
+	if (likely(!udp_unexpected_gso(sk, skb)))
+		return udp_queue_rcv_one_skb(sk, skb);
+
+	BUILD_BUG_ON(sizeof(struct udp_skb_cb) > SKB_SGO_CB_OFFSET);
+	__skb_push(skb, -skb_mac_offset(skb));
+	segs = udp_rcv_segment(sk, skb, true);
+	for (skb = segs; skb; skb = next) {
+		next = skb->next;
+		__skb_pull(skb, skb_transport_offset(skb));
+		ret = udp_queue_rcv_one_skb(sk, skb);
+		if (ret > 0)
+			ip_protocol_deliver_rcu(dev_net(skb->dev), skb, -ret);
+	}
+	return 0;
 
 skip_filter:
-	return __udp_queue_rcv_skb(sk, skb);
+	/* * IMS Bypass: Still handle GSO segmentation if present, 
+	 * but proceed without filter evaluation.
+	 */
+	if (likely(!udp_unexpected_gso(sk, skb)))
+		return udp_queue_rcv_one_skb(sk, skb);
 
-drop:
-	__UDP_INC_STATS(sock_net(sk), UDP_MIB_INERRORS, is_udplite);
-	atomic_inc(&sk->sk_drops);
-	kfree_skb(skb);
-	return -1;
+	__skb_push(skb, -skb_mac_offset(skb));
+	segs = udp_rcv_segment(sk, skb, true);
+	for (skb = segs; skb; skb = next) {
+		next = skb->next;
+		__skb_pull(skb, skb_transport_offset(skb));
+		udp_queue_rcv_one_skb(sk, skb);
+	}
+	return 0;
 }
 /* * This remains mostly standard, but ensures 
  * the bypass target is reached. 
@@ -1993,38 +2012,18 @@ static int udp_queue_rcv_one_skb(struct sock *sk, struct sk_buff *skb)
 				return -ret;
 			}
 		}
-
-		/* FALLTHROUGH -- it's a UDP Packet */
 	}
 
 	/*
 	 * 	UDP-Lite specific tests, ignored on UDP sockets
 	 */
-	if ((up->pcflag & UDPLITE_RECV_CC)  &&  UDP_SKB_CB(skb)->partial_cov) {
-
-		/*
-		 * MIB statistics other than incrementing the error count are
-		 * disabled for the following two types of errors: these depend
-		 * on the application settings, not on the functioning of the
-		 * protocol stack as such.
-		 *
-		 * RFC 3828 here recommends (sec 3.3): "There should also be a
-		 * way ... to ... at least let the receiving application block
-		 * delivery of packets with coverage values less than a value
-		 * provided by the application."
-		 */
-		if (up->pcrlen == 0) {          /* full coverage was set  */
+	if ((up->pcflag & UDPLITE_RECV_CC) && UDP_SKB_CB(skb)->partial_cov) {
+		if (up->pcrlen == 0) {
 			net_dbg_ratelimited("UDPLite: partial coverage %d while full coverage %d requested\n",
 					    UDP_SKB_CB(skb)->cscov, skb->len);
 			goto drop;
 		}
-		/* The next case involves violating the min. coverage requested
-		 * by the receiver. This is subtle: if receiver wants x and x is
-		 * greater than the buffersize/MTU then receiver will complain
-		 * that it wants x while sender emits packets of smaller size y.
-		 * Therefore the above ...()->partial_cov statement is essential.
-		 */
-		if (UDP_SKB_CB(skb)->cscov  <  up->pcrlen) {
+		if (UDP_SKB_CB(skb)->cscov < up->pcrlen) {
 			net_dbg_ratelimited("UDPLite: coverage %d too small, need min %d\n",
 					    UDP_SKB_CB(skb)->cscov, up->pcrlen);
 			goto drop;
@@ -2040,8 +2039,8 @@ static int udp_queue_rcv_one_skb(struct sock *sk, struct sk_buff *skb)
 		goto drop;
 
 	udp_csum_pull_header(skb);
-
 	ipv4_pktinfo_prepare(sk, skb);
+
 	return __udp_queue_rcv_skb(sk, skb);
 
 csum_error:
@@ -2051,27 +2050,6 @@ drop:
 	atomic_inc(&sk->sk_drops);
 	kfree_skb(skb);
 	return -1;
-}
-
-static int udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
-{
-	struct sk_buff *next, *segs;
-	int ret;
-
-	if (likely(!udp_unexpected_gso(sk, skb)))
-		return udp_queue_rcv_one_skb(sk, skb);
-
-	BUILD_BUG_ON(sizeof(struct udp_skb_cb) > SKB_SGO_CB_OFFSET);
-	__skb_push(skb, -skb_mac_offset(skb));
-	segs = udp_rcv_segment(sk, skb, true);
-	for (skb = segs; skb; skb = next) {
-		next = skb->next;
-		__skb_pull(skb, skb_transport_offset(skb));
-		ret = udp_queue_rcv_one_skb(sk, skb);
-		if (ret > 0)
-			ip_protocol_deliver_rcu(dev_net(skb->dev), skb, -ret);
-	}
-	return 0;
 }
 
 /* For TCP sockets, sk_rx_dst is protected by socket lock
