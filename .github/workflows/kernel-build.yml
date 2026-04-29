@@ -122,4 +122,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: A32-Kernel-AK3-${{ github.sha }}
+          path: A32-Kernel-AK3.zip  # <--- This was missing!
+          if-no-files-found: error # Change to error so you know if it failed
 #All good noobie
