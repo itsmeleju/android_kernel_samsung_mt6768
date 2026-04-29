@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - Noobie-patches
+      - Github-actions
 
 jobs:
   build:
