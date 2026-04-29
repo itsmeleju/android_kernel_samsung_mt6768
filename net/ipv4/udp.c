@@ -1874,6 +1874,7 @@ static int udp_queue_rcv_one_skb(struct sock *sk, struct sk_buff *skb)
 {
 	struct udp_sock *up = udp_sk(sk);
 	int is_udplite = IS_UDPLITE(sk);
+
 	/*
 	 *	Charge it to the socket, dropping if the queue is full.
 	 */
@@ -1894,109 +1895,6 @@ static int udp_queue_rcv_one_skb(struct sock *sk, struct sk_buff *skb)
 		 * >0 if skb should be passed on to UDP.
 		 * <0 if skb should be resubmitted as proto -N
 		 */
-
-static int __udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
-{
-	int rc;
-
-	if (inet_sk(sk)->inet_daddr) {
-		sock_rps_save_rxhash(sk, skb);
-		sk_mark_napi_id(sk, skb);
-		sk_incoming_cpu_update(sk);
-	} else {
-		sk_mark_napi_id_once(sk, skb);
-	}
-
-	rc = __udp_enqueue_schedule_skb(sk, skb);
-	if (rc < 0) {
-		int is_udplite = IS_UDPLITE(sk);
-
-		/* Note that an ENOMEM error is charged twice */
-		if (rc == -ENOMEM)
-			UDP_INC_STATS(sock_net(sk), UDP_MIB_RCVBUFERRORS,
-					is_udplite);
-		UDP_INC_STATS(sock_net(sk), UDP_MIB_INERRORS, is_udplite);
-		kfree_skb(skb);
-		trace_udp_fail_queue_rcv_skb(rc, sk);
-		return -1;
-	}
-
-	return 0;
-}
-
-/*
- * Ensures SIP packets bypass filters to prevent drops during CA/net_cls transitions.
- */
-
-int udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
-{
-	struct sk_buff *next, *segs;
-	int ret;
-	/*
-	 * MT6768 VoLTE fix: Bypass sk_filter for IMS signaling.
-	 * LTE CA toggles mid-call can cause BPF filters to return EPERM.
-	 * Port 5060/5061 (SIP) and 5004 (RTP) must reach the socket.
-	 */
-	if (sk->sk_protocol == IPPROTO_UDP) {
-		struct udphdr *uh = udp_hdr(skb);
-		__be16 dport = uh->dest;
-		__be16 sport = uh->source;
-
-		if (dport == htons(5060) || dport == htons(5061) || dport == htons(5004) ||
-		    sport == htons(5060) || sport == htons(5061) || sport == htons(5004)) {
-			goto skip_filter;
-		}
-	}
-	/* GSO/Segment handling */
-	if (likely(!udp_unexpected_gso(sk, skb)))
-		return udp_queue_rcv_one_skb(sk, skb);
-
-	BUILD_BUG_ON(sizeof(struct udp_skb_cb) > SKB_SGO_CB_OFFSET);
-	__skb_push(skb, -skb_mac_offset(skb));
-	segs = udp_rcv_segment(sk, skb, true);
-	for (skb = segs; skb; skb = next) {
-		next = skb->next;
-		__skb_pull(skb, skb_transport_offset(skb));
-		ret = udp_queue_rcv_one_skb(sk, skb);
-		if (ret > 0)
-			ip_protocol_deliver_rcu(dev_net(skb->dev), skb, -ret);
-	}
-	return 0;
-
-skip_filter:
-	/* * IMS Bypass: Still handle GSO segmentation if present, 
-	 * but proceed without filter evaluation.
-	 */
-	if (likely(!udp_unexpected_gso(sk, skb)))
-		return udp_queue_rcv_one_skb(sk, skb);
-
-	__skb_push(skb, -skb_mac_offset(skb));
-	segs = udp_rcv_segment(sk, skb, true);
-	for (skb = segs; skb; skb = next) {
-		next = skb->next;
-		__skb_pull(skb, skb_transport_offset(skb));
-		udp_queue_rcv_one_skb(sk, skb);
-	}
-	return 0;
-}
-/* * This remains mostly standard, but ensures 
- * the bypass target is reached. 
- */
-
-void udp_encap_enable(void)
-{
-	static_key_enable(&udp_encap_needed);
-}
-EXPORT_SYMBOL(udp_encap_enable);
-
-/* returns:
- *  -1: error
- *   0: success
- *  >0: "udp encap" protocol resubmission
- *
- * Note that in the success and error cases, the skb is assumed to
- * have either been requeued or freed.
- */
 
 		/* if we're overly short, let UDP handle it */
 		encap_rcv = ACCESS_ONCE(up->encap_rcv);
@@ -2054,6 +1952,116 @@ drop:
 	kfree_skb(skb);
 	return -1;
 }
+
+static int __udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
+{
+	int rc;
+
+	if (inet_sk(sk)->inet_daddr) {
+		sock_rps_save_rxhash(sk, skb);
+		sk_mark_napi_id(sk, skb);
+		sk_incoming_cpu_update(sk);
+	} else {
+		sk_mark_napi_id_once(sk, skb);
+	}
+
+	rc = __udp_enqueue_schedule_skb(sk, skb);
+	if (rc < 0) {
+		int is_udplite = IS_UDPLITE(sk);
+
+		/* Note that an ENOMEM error is charged twice */
+		if (rc == -ENOMEM)
+			UDP_INC_STATS(sock_net(sk), UDP_MIB_RCVBUFERRORS,
+					is_udplite);
+		UDP_INC_STATS(sock_net(sk), UDP_MIB_INERRORS, is_udplite);
+		kfree_skb(skb);
+		trace_udp_fail_queue_rcv_skb(rc, sk);
+		return -1;
+	}
+
+	return 0;
+}
+
+/*
+ * Ensures SIP packets bypass filters to prevent drops during CA/net_cls
+ * transitions. Specifically, LTE CA toggles mid-call can cause BPF filters
+ * to return EPERM. Ports 5060/5061 (SIP) and 5004 (RTP) must always reach
+ * the socket.
+ *
+ * returns:
+ *  -1: error
+ *   0: success
+ *  >0: "udp encap" protocol resubmission
+ *
+ * Note that in the success and error cases, the skb is assumed to
+ * have either been requeued or freed.
+ */
+int udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
+{
+	struct sk_buff *next, *segs;
+	int ret;
+
+	/*
+	 * IMS signaling bypass: for SIP (5060/5061) and RTP (5004) ports,
+	 * skip sk_filter evaluation entirely and go straight to queueing.
+	 * This prevents BPF filters returning EPERM from dropping IMS traffic
+	 * during LTE CA or net_cls transitions.
+	 */
+	if (sk->sk_protocol == IPPROTO_UDP) {
+		struct udphdr *uh = udp_hdr(skb);
+		__be16 dest   = uh->dest;
+		__be16 source = uh->source;
+
+		if (dest   == htons(5060) || dest   == htons(5061) ||
+		    dest   == htons(5004) ||
+		    source == htons(5060) || source == htons(5061) ||
+		    source == htons(5004))
+			goto skip_filter;
+	}
+
+	/* Normal path: GSO segmentation + standard filter */
+	if (likely(!udp_unexpected_gso(sk, skb)))
+		return udp_queue_rcv_one_skb(sk, skb);
+
+	BUILD_BUG_ON(sizeof(struct udp_skb_cb) > SKB_SGO_CB_OFFSET);
+	__skb_push(skb, -skb_mac_offset(skb));
+	segs = udp_rcv_segment(sk, skb, true);
+	for (skb = segs; skb; skb = next) {
+		next = skb->next;
+		__skb_pull(skb, skb_transport_offset(skb));
+		ret = udp_queue_rcv_one_skb(sk, skb);
+		if (ret > 0)
+			ip_protocol_deliver_rcu(dev_net(skb->dev), skb, -ret);
+	}
+	return 0;
+
+skip_filter:
+	/*
+	 * IMS bypass path: still perform GSO segmentation if needed,
+	 * but skip filter evaluation. Return values from
+	 * udp_queue_rcv_one_skb() are preserved and handled correctly.
+	 */
+	if (likely(!udp_unexpected_gso(sk, skb)))
+		return udp_queue_rcv_one_skb(sk, skb);
+
+	BUILD_BUG_ON(sizeof(struct udp_skb_cb) > SKB_SGO_CB_OFFSET);
+	__skb_push(skb, -skb_mac_offset(skb));
+	segs = udp_rcv_segment(sk, skb, true);
+	for (skb = segs; skb; skb = next) {
+		next = skb->next;
+		__skb_pull(skb, skb_transport_offset(skb));
+		ret = udp_queue_rcv_one_skb(sk, skb);
+		if (ret > 0)
+			ip_protocol_deliver_rcu(dev_net(skb->dev), skb, -ret);
+	}
+	return 0;
+}
+
+void udp_encap_enable(void)
+{
+	static_key_enable(&udp_encap_needed);
+}
+EXPORT_SYMBOL(udp_encap_enable);
 
 /* For TCP sockets, sk_rx_dst is protected by socket lock
  * For UDP, we use xchg() to guard against concurrent changes.
