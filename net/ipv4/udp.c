@@ -1869,9 +1869,65 @@ static void udp_v4_rehash(struct sock *sk)
 					  inet_sk(sk)->inet_num);
 	udp_lib_rehash(sk, new_hash);
 }
+
+static int udp_queue_rcv_one_skb(struct sock *sk, struct sk_buff *skb)
+{
+	struct udp_sock *up = udp_sk(sk);
+	int is_udplite = IS_UDPLITE(sk);
+	/*
+	 *	Charge it to the socket, dropping if the queue is full.
+	 */
+	if (!xfrm4_policy_check(sk, XFRM_POLICY_IN, skb))
+		goto drop;
+	nf_reset(skb);
+
+	if (static_key_false(&udp_encap_needed) && up->encap_type) {
+		int (*encap_rcv)(struct sock *sk, struct sk_buff *skb);
+
+		/*
+		 * This is an encapsulation socket so pass the skb to
+		 * the socket's udp_encap_rcv() hook. Otherwise, just
+		 * fall through and pass this up the UDP socket.
+		 * up->encap_rcv() returns the following value:
+		 * =0 if skb was successfully passed to the encap
+		 *    handler or was discarded by it.
+		 * >0 if skb should be passed on to UDP.
+		 * <0 if skb should be resubmitted as proto -N
+		 */
+
+static int __udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
+{
+	int rc;
+
+	if (inet_sk(sk)->inet_daddr) {
+		sock_rps_save_rxhash(sk, skb);
+		sk_mark_napi_id(sk, skb);
+		sk_incoming_cpu_update(sk);
+	} else {
+		sk_mark_napi_id_once(sk, skb);
+	}
+
+	rc = __udp_enqueue_schedule_skb(sk, skb);
+	if (rc < 0) {
+		int is_udplite = IS_UDPLITE(sk);
+
+		/* Note that an ENOMEM error is charged twice */
+		if (rc == -ENOMEM)
+			UDP_INC_STATS(sock_net(sk), UDP_MIB_RCVBUFERRORS,
+					is_udplite);
+		UDP_INC_STATS(sock_net(sk), UDP_MIB_INERRORS, is_udplite);
+		kfree_skb(skb);
+		trace_udp_fail_queue_rcv_skb(rc, sk);
+		return -1;
+	}
+
+	return 0;
+}
+
 /*
  * Ensures SIP packets bypass filters to prevent drops during CA/net_cls transitions.
  */
+
 int udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 {
 	struct sk_buff *next, *segs;
@@ -1891,7 +1947,6 @@ int udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 			goto skip_filter;
 		}
 	}
-
 	/* GSO/Segment handling */
 	if (likely(!udp_unexpected_gso(sk, skb)))
 		return udp_queue_rcv_one_skb(sk, skb);
@@ -1927,34 +1982,6 @@ skip_filter:
 /* * This remains mostly standard, but ensures 
  * the bypass target is reached. 
  */
-static int __udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
-{
-	int rc;
-
-	if (inet_sk(sk)->inet_daddr) {
-		sock_rps_save_rxhash(sk, skb);
-		sk_mark_napi_id(sk, skb);
-		sk_incoming_cpu_update(sk);
-	} else {
-		sk_mark_napi_id_once(sk, skb);
-	}
-
-	rc = __udp_enqueue_schedule_skb(sk, skb);
-	if (rc < 0) {
-		int is_udplite = IS_UDPLITE(sk);
-
-		/* Note that an ENOMEM error is charged twice */
-		if (rc == -ENOMEM)
-			UDP_INC_STATS(sock_net(sk), UDP_MIB_RCVBUFERRORS,
-					is_udplite);
-		UDP_INC_STATS(sock_net(sk), UDP_MIB_INERRORS, is_udplite);
-		kfree_skb(skb);
-		trace_udp_fail_queue_rcv_skb(rc, sk);
-		return -1;
-	}
-
-	return 0;
-}
 
 void udp_encap_enable(void)
 {
@@ -1970,30 +1997,6 @@ EXPORT_SYMBOL(udp_encap_enable);
  * Note that in the success and error cases, the skb is assumed to
  * have either been requeued or freed.
  */
-static int udp_queue_rcv_one_skb(struct sock *sk, struct sk_buff *skb)
-{
-	struct udp_sock *up = udp_sk(sk);
-	int is_udplite = IS_UDPLITE(sk);
-	/*
-	 *	Charge it to the socket, dropping if the queue is full.
-	 */
-	if (!xfrm4_policy_check(sk, XFRM_POLICY_IN, skb))
-		goto drop;
-	nf_reset(skb);
-
-	if (static_key_false(&udp_encap_needed) && up->encap_type) {
-		int (*encap_rcv)(struct sock *sk, struct sk_buff *skb);
-
-		/*
-		 * This is an encapsulation socket so pass the skb to
-		 * the socket's udp_encap_rcv() hook. Otherwise, just
-		 * fall through and pass this up the UDP socket.
-		 * up->encap_rcv() returns the following value:
-		 * =0 if skb was successfully passed to the encap
-		 *    handler or was discarded by it.
-		 * >0 if skb should be passed on to UDP.
-		 * <0 if skb should be resubmitted as proto -N
-		 */
 
 		/* if we're overly short, let UDP handle it */
 		encap_rcv = ACCESS_ONCE(up->encap_rcv);
