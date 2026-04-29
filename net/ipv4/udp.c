@@ -1869,9 +1869,32 @@ static void udp_v4_rehash(struct sock *sk)
 					  inet_sk(sk)->inet_num);
 	udp_lib_rehash(sk, new_hash);
 }
-/*
- * Ensures SIP packets bypass filters to prevent drops during CA/net_cls transitions.
- */
+
+static int udp_queue_rcv_one_skb(struct sock *sk, struct sk_buff *skb)
+{
+	struct udp_sock *up = udp_sk(sk);
+	int is_udplite = IS_UDPLITE(sk);
+	/*
+	 *	Charge it to the socket, dropping if the queue is full.
+	 */
+	if (!xfrm4_policy_check(sk, XFRM_POLICY_IN, skb))
+		goto drop;
+	nf_reset(skb);
+
+	if (static_key_false(&udp_encap_needed) && up->encap_type) {
+		int (*encap_rcv)(struct sock *sk, struct sk_buff *skb);
+
+		/*
+		 * This is an encapsulation socket so pass the skb to
+		 * the socket's udp_encap_rcv() hook. Otherwise, just
+		 * fall through and pass this up the UDP socket.
+		 * up->encap_rcv() returns the following value:
+		 * =0 if skb was successfully passed to the encap
+		 *    handler or was discarded by it.
+		 * >0 if skb should be passed on to UDP.
+		 * <0 if skb should be resubmitted as proto -N
+		 */
+
 static int __udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 {
 	int rc;
@@ -1890,87 +1913,31 @@ static int __udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 
 		/* Note that an ENOMEM error is charged twice */
 		if (rc == -ENOMEM)
-			UDP_INC_STATS(sock_net(sk), UDP_MIB_RCVBUFERRORS, is_udplite);
+			UDP_INC_STATS(sock_net(sk), UDP_MIB_RCVBUFERRORS,
+					is_udplite);
 		UDP_INC_STATS(sock_net(sk), UDP_MIB_INERRORS, is_udplite);
 		kfree_skb(skb);
 		trace_udp_fail_queue_rcv_skb(rc, sk);
 		return -1;
 	}
+
 	return 0;
 }
 
-static int udp_queue_rcv_one_skb(struct sock *sk, struct sk_buff *skb)
-{
-	struct udp_sock *up = udp_sk(sk);
-	int is_udplite = IS_UDPLITE(sk);
-
-	/*
-	 *	Charge it to the socket, dropping if the queue is full.
-	 */
-	if (!xfrm4_policy_check(sk, XFRM_POLICY_IN, skb))
-		goto drop;
-	nf_reset(skb);
-
-	if (static_key_false(&udp_encap_needed) && up->encap_type) {
-		int (*encap_rcv)(struct sock *sk, struct sk_buff *skb);
-
-		/*
-		 * This is an encapsulation socket so pass the skb to
-		 * the socket's udp_encap_rcv() hook. Otherwise, just
-		 * fall through and pass this up the UDP socket.
-		 * up->encap_rcv() returns the following value:
-		 * =0 if skb was successfully passed to the encap
-		 * handler or was discarded by it.
-		 * >0 if skb should be passed on to UDP.
-		 * <0 if skb should be resubmitted as proto -N
-		 */
-
-		/* if we're overly short, let UDP handle it */
-		encap_rcv = ACCESS_ONCE(up->encap_rcv);
-		if (encap_rcv) {
-			int ret;
-			if (udp_lib_checksum_complete(skb))
-				goto csum_error;
-
-			ret = encap_rcv(sk, skb);
-			if (ret <= 0) {
-				__UDP_INC_STATS(sock_net(sk), UDP_MIB_INDATAGRAMS, is_udplite);
-				return -ret;
-			}
-		}
-	}
-
-	prefetch(&sk->sk_rmem_alloc);
-	if (rcu_access_pointer(sk->sk_filter) && udp_lib_checksum_complete(skb))
-		goto csum_error;
-
-	if (sk_filter_trim_cap(sk, skb, sizeof(struct udphdr)))
-		goto drop;
-
-	udp_csum_pull_header(skb);
-	ipv4_pktinfo_prepare(sk, skb);
-	return __udp_queue_rcv_skb(sk, skb);
-
-csum_error:
-	__UDP_INC_STATS(sock_net(sk), UDP_MIB_CSUMERRORS, is_udplite);
-drop:
-	__UDP_INC_STATS(sock_net(sk), UDP_MIB_INERRORS, is_udplite);
-	atomic_inc(&sk->sk_drops);
-	kfree_skb(skb);
-	return -1;
-}
+/*
+ * Ensures SIP packets bypass filters to prevent drops during CA/net_cls transitions.
+ */
 
 int udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 {
 	struct sk_buff *next, *segs;
 	int ret;
-
 	/*
 	 * MT6768 VoLTE fix: Bypass sk_filter for IMS signaling.
 	 * LTE CA toggles mid-call can cause BPF filters to return EPERM.
 	 * Port 5060/5061 (SIP) and 5004 (RTP) must reach the socket.
 	 */
-	if (sk && sk->sk_protocol == IPPROTO_UDP) {
+	if (sk->sk_protocol == IPPROTO_UDP) {
 		struct udphdr *uh = udp_hdr(skb);
 		__be16 dport = uh->dest;
 		__be16 sport = uh->source;
@@ -1980,7 +1947,6 @@ int udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 			goto skip_filter;
 		}
 	}
-
 	/* GSO/Segment handling */
 	if (likely(!udp_unexpected_gso(sk, skb)))
 		return udp_queue_rcv_one_skb(sk, skb);
@@ -1998,13 +1964,12 @@ int udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 	return 0;
 
 skip_filter:
-	/*
-	 * IMS Bypass: Still handle GSO if present, but proceed without filter evaluation.
+	/* * IMS Bypass: Still handle GSO segmentation if present, 
+	 * but proceed without filter evaluation.
 	 */
 	if (likely(!udp_unexpected_gso(sk, skb)))
 		return udp_queue_rcv_one_skb(sk, skb);
 
-	BUILD_BUG_ON(sizeof(struct udp_skb_cb) > SKB_SGO_CB_OFFSET);
 	__skb_push(skb, -skb_mac_offset(skb));
 	segs = udp_rcv_segment(sk, skb, true);
 	for (skb = segs; skb; skb = next) {
@@ -2014,16 +1979,82 @@ skip_filter:
 	}
 	return 0;
 }
+/* * This remains mostly standard, but ensures 
+ * the bypass target is reached. 
+ */
 
 void udp_encap_enable(void)
 {
 	static_key_enable(&udp_encap_needed);
 }
 EXPORT_SYMBOL(udp_encap_enable);
-/* * This remains mostly standard, but ensures 
- * the bypass target is reached. 
+
+/* returns:
+ *  -1: error
+ *   0: success
+ *  >0: "udp encap" protocol resubmission
+ *
+ * Note that in the success and error cases, the skb is assumed to
+ * have either been requeued or freed.
  */
-//moved above- noobie
+
+		/* if we're overly short, let UDP handle it */
+		encap_rcv = ACCESS_ONCE(up->encap_rcv);
+		if (encap_rcv) {
+			int ret;
+
+			/* Verify checksum before giving to encap */
+			if (udp_lib_checksum_complete(skb))
+				goto csum_error;
+
+			ret = encap_rcv(sk, skb);
+			if (ret <= 0) {
+				__UDP_INC_STATS(sock_net(sk),
+						UDP_MIB_INDATAGRAMS,
+						is_udplite);
+				return -ret;
+			}
+		}
+	}
+
+	/*
+	 * 	UDP-Lite specific tests, ignored on UDP sockets
+	 */
+	if ((up->pcflag & UDPLITE_RECV_CC) && UDP_SKB_CB(skb)->partial_cov) {
+		if (up->pcrlen == 0) {
+			net_dbg_ratelimited("UDPLite: partial coverage %d while full coverage %d requested\n",
+					    UDP_SKB_CB(skb)->cscov, skb->len);
+			goto drop;
+		}
+		if (UDP_SKB_CB(skb)->cscov < up->pcrlen) {
+			net_dbg_ratelimited("UDPLite: coverage %d too small, need min %d\n",
+					    UDP_SKB_CB(skb)->cscov, up->pcrlen);
+			goto drop;
+		}
+	}
+
+	prefetch(&sk->sk_rmem_alloc);
+	if (rcu_access_pointer(sk->sk_filter) &&
+	    udp_lib_checksum_complete(skb))
+			goto csum_error;
+
+	if (sk_filter_trim_cap(sk, skb, sizeof(struct udphdr)))
+		goto drop;
+
+	udp_csum_pull_header(skb);
+	ipv4_pktinfo_prepare(sk, skb);
+
+	return __udp_queue_rcv_skb(sk, skb);
+
+csum_error:
+	__UDP_INC_STATS(sock_net(sk), UDP_MIB_CSUMERRORS, is_udplite);
+drop:
+	__UDP_INC_STATS(sock_net(sk), UDP_MIB_INERRORS, is_udplite);
+	atomic_inc(&sk->sk_drops);
+	kfree_skb(skb);
+	return -1;
+}
+
 /* For TCP sockets, sk_rx_dst is protected by socket lock
  * For UDP, we use xchg() to guard against concurrent changes.
  */
