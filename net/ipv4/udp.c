@@ -1440,6 +1440,35 @@ void udp_destruct_common(struct sock *sk)
 	udp_rmem_release(sk, total, 0, true);
 }
 EXPORT_SYMBOL_GPL(udp_destruct_common);
+// Added line move change
+static int __udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
+{
+	int rc;
+
+	if (inet_sk(sk)->inet_daddr) {
+		sock_rps_save_rxhash(sk, skb);
+		sk_mark_napi_id(sk, skb);
+		sk_incoming_cpu_update(sk);
+	} else {
+		sk_mark_napi_id_once(sk, skb);
+	}
+
+	rc = __udp_enqueue_schedule_skb(sk, skb);
+	if (rc < 0) {
+		int is_udplite = IS_UDPLITE(sk);
+
+		/* Note that an ENOMEM error is charged twice */
+		if (rc == -ENOMEM)
+			UDP_INC_STATS(sock_net(sk), UDP_MIB_RCVBUFERRORS,
+					is_udplite);
+		UDP_INC_STATS(sock_net(sk), UDP_MIB_INERRORS, is_udplite);
+		kfree_skb(skb);
+		trace_udp_fail_queue_rcv_skb(rc, sk);
+		return -1;
+	}
+
+	return 0;
+}
 
 static void udp_destruct_sock(struct sock *sk)
 {
@@ -1952,7 +1981,7 @@ drop:
 	kfree_skb(skb);
 	return -1;
 }
-
+/*
 static int __udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 {
 	int rc;
@@ -1969,7 +1998,7 @@ static int __udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 	if (rc < 0) {
 		int is_udplite = IS_UDPLITE(sk);
 
-		/* Note that an ENOMEM error is charged twice */
+		// Note that an ENOMEM error is charged twice 
 		if (rc == -ENOMEM)
 			UDP_INC_STATS(sock_net(sk), UDP_MIB_RCVBUFERRORS,
 					is_udplite);
@@ -1981,7 +2010,7 @@ static int __udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 
 	return 0;
 }
-
+*/
 /*
  * Ensures SIP packets bypass filters to prevent drops during CA/net_cls
  * transitions. Specifically, LTE CA toggles mid-call can cause BPF filters
