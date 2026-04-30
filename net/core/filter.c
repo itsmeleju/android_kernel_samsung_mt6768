@@ -143,18 +143,22 @@ int sk_filter_trim_cap(struct sock *sk, struct sk_buff *skb, unsigned int cap)
 	 * Carrier Aggregation (CA) toggles can change cgroup net_cls mid-call,
 	 * causing BPF egress/ingress hooks to return EPERM for SIP/RTP.
 	 */
-	if (sk && sk_fullsock(sk) && sk->sk_protocol == IPPROTO_UDP) {
+rcu_read_lock();
+/* Ensure sk is not NULL and is a full INET socket */
+if (sk && sk_fullsock(sk) && sk->sk_family == AF_INET && sk->sk_protocol == IPPROTO_UDP) {
     struct inet_sock *inet = inet_sk(sk);
-    /* Use __constant_htons for slightly better performance in kernel space */
-    if (inet->inet_sport == __constant_htons(5060) || 
-        inet->inet_sport == __constant_htons(5061) || 
-        inet->inet_sport == __constant_htons(5004) ||
-        inet->inet_dport == __constant_htons(5060) || 
-        inet->inet_dport == __constant_htons(5061) || 
-        inet->inet_dport == __constant_htons(5004)) {
-        return 0; 
+    
+    /* Using variables to avoid repeated pointer deref */
+    __be16 lport = inet->inet_sport;
+    __be16 rport = inet->inet_dport;
+
+    if (lport == htons(5060) || lport == htons(5061) || lport == htons(5004) ||
+        rport == htons(5060) || rport == htons(5061) || rport == htons(5004)) {
+        rcu_read_unlock();
+        return 0;
     }
 }
+rcu_read_unlock();
 
 	err = BPF_CGROUP_RUN_PROG_INET_INGRESS(sk, skb);
 	if (err)
