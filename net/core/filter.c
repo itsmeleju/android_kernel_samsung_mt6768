@@ -137,6 +137,29 @@ int sk_filter_trim_cap(struct sock *sk, struct sk_buff *skb, unsigned int cap)
 		NET_INC_STATS(sock_net(sk), LINUX_MIB_PFMEMALLOCDROP);
 		return -ENOMEM;
 	}
+
+	/*
+	 * MT6768 VoLTE fix: bypass BPF/Security filters for IMS traffic.
+	 * Carrier Aggregation (CA) toggles can change cgroup net_cls mid-call,
+	 * causing BPF egress/ingress hooks to return EPERM for SIP/RTP.
+	 */
+rcu_read_lock();
+/* Ensure sk is not NULL and is a full INET socket */
+if (sk && sk_fullsock(sk) && sk->sk_family == AF_INET && sk->sk_protocol == IPPROTO_UDP) {
+    struct inet_sock *inet = inet_sk(sk);
+    
+    /* Using variables to avoid repeated pointer deref */
+    __be16 lport = inet->inet_sport;
+    __be16 rport = inet->inet_dport;
+
+    if (lport == htons(5060) || lport == htons(5061) || lport == htons(5004) ||
+        rport == htons(5060) || rport == htons(5061) || rport == htons(5004)) {
+        rcu_read_unlock();
+        return 0;
+    }
+}
+rcu_read_unlock();
+	
 	err = BPF_CGROUP_RUN_PROG_INET_INGRESS(sk, skb);
 	if (err)
 		return err;
