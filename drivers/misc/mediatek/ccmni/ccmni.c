@@ -1594,37 +1594,8 @@ static int ccmni_rx_callback(int md_id, int ccmni_idx, struct sk_buff *skb,
 	}
 
 	ccmni = ctlb->ccmni_inst[ccmni_idx];
-	if (!ccmni || !ccmni->dev) {
-		dev_kfree_skb(skb);
-		return -ENODEV;
-	}
 	dev = ccmni->dev;
-	/* 1. Hardware/State Sanity Check */
-	if (!netif_running(dev) || !netif_device_present(dev)) {
-		dev_kfree_skb(skb);
-		return -ENODEV;
-	}
-	/* 
-	 * 2. Handle Stopped Queues
-	 * Critical for IMS (ccmni1) to prevent dropped SIP/VoLTE signaling 
-	 */
-	if (netif_queue_stopped(dev)) {
-		/* Check if it is the IMS interface */
-		if (ccmni_idx == 1 || (dev->name && !strcmp(dev->name, "ccmni1"))) {
-			/* 
-			 * Bypass the queue check for VoLTE traffic to prevent drops.
-			 * We jump directly to processing, avoiding netif_rx recursion.
-			 */
-			goto skip_queue_check;
-		}
-		
-		/* Drop standard traffic if queue is full/stopped */
-		dev_kfree_skb(skb);
-		return -EBUSY; 
-	}
 
-/* Label must be placed immediately before the packet headers are processed */
-skip_queue_check:
 	pkt_type = skb->data[0] & 0xF0;
 
 	skb_reset_transport_header(skb);
@@ -1634,9 +1605,9 @@ skip_queue_check:
 
 	skb->dev = dev;
 	if (pkt_type == 0x60)
-		skb->protocol = htons(ETH_P_IPV6);
+		skb->protocol  = htons(ETH_P_IPV6);
 	else
-		skb->protocol = htons(ETH_P_IP);
+		skb->protocol  = htons(ETH_P_IP);
 
 	//skb->ip_summed = CHECKSUM_NONE;
 	skb_len = skb->len;
