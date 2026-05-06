@@ -22,6 +22,8 @@
 DEFINE_STATIC_KEY_FALSE(cgroup_bpf_enabled_key);
 EXPORT_SYMBOL(cgroup_bpf_enabled_key);
 
+extern int volte_ims_bypass_check(struct sk_buff *skb); //to Declaration volte_ims_bypass_check
+
 void cgroup_bpf_offline(struct cgroup *cgrp)
 {
 	cgroup_get(cgrp);
@@ -35,7 +37,6 @@ static void bpf_cgroup_storages_free(struct bpf_cgroup_storage *storages[])
 	for_each_cgroup_storage_type(stype)
 		bpf_cgroup_storage_free(storages[stype]);
 }
-extern int volte_ims_bypass_check(struct sk_buff *skb); //to call volte_ims_bypass_check
 
 static int bpf_cgroup_storages_alloc(struct bpf_cgroup_storage *storages[],
 				     struct bpf_cgroup_storage *new_storages[],
