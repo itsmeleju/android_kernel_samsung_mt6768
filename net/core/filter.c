@@ -81,6 +81,11 @@
 #include <linux/btf_ids.h>
 #include <net/tls.h>
 
+#define IMS_PORT_SIP   ((__be16)0x9413) /* 5060 */
+#define IMS_PORT_SIPS  ((__be16)0x9513) /* 5061 */
+#define IMS_PORT_RTP   ((__be16)0x8C13) /* 5004 */
+#define IMS_PORT_RTCP  ((__be16)0x8D13) /* 5005 */
+
 /* Keep the struct bpf_fib_lookup small so that it fits into a cacheline */
 static_assert(sizeof(struct bpf_fib_lookup) == 64, "struct bpf_fib_lookup size check");
 
@@ -110,7 +115,7 @@ int copy_bpf_fprog_from_user(struct sock_fprog *dst, sockptr_t src, int len)
 }
 EXPORT_SYMBOL_GPL(copy_bpf_fprog_from_user);
 
-/**
+/*
  *	sk_filter_trim_cap - run a packet through a socket filter
  *	@sk: sock associated with &sk_buff
  *	@skb: buffer to filter
@@ -121,73 +126,48 @@ EXPORT_SYMBOL_GPL(copy_bpf_fprog_from_user);
  * than pkt_len we keep whole skb->data. This is the socket level
  * wrapper to BPF_PROG_RUN. It returns 0 if the packet should
  * be accepted or -EPERM if the packet should be tossed.
- *
- */
-/*
  * MT6768 VoLTE fix: bypass BPF/cgroup-inet hooks for IMS/RTP traffic.
  * Kernel 4.14 compatible. Safe rcu_read_lock discipline throughout.
+ * helper function: NOT static so other files (cgroup.o) can link to it.
  */
-static const __be16 PORT_SIP  = (__force __be16)__constant_htons(5060);
-static const __be16 PORT_SIPS = (__force __be16)__constant_htons(5061);
-static const __be16 PORT_RTP  = (__force __be16)__constant_htons(5004);
-static const __be16 PORT_RTCP = (__force __be16)__constant_htons(5005);
-
-static inline bool is_ims_port(__be16 port)
-{
-    return port == PORT_SIP  ||
-           port == PORT_SIPS ||
-           port == PORT_RTP  ||
-           port == PORT_RTCP;
-}
-
-/* Call this where your BPF/netfilter hook runs */
-static int volte_ims_bypass_check(struct sk_buff *skb)
+int volte_ims_bypass_check(struct sk_buff *skb)
 {
     struct sock *sk;
     struct inet_sock *inet;
-    __be16 lport, rport;
-    bool bypass = false;
+    int is_ims = 0;
 
-    /*
-     * MUST use skb_to_full_sk() on 4.14 — skb->sk may be a
-     * request_sock or timewait_sock, causing inet_sk() to
-     * read garbage fields and oops.
-     */
+    /* 4.14 safety: avoid request_sock pointers which cause oops/crash */
     sk = skb_to_full_sk(skb);
-
-    /* NULL check BEFORE rcu_read_lock to keep lock scope minimal */
     if (!sk || !sk_fullsock(sk))
-        goto out_no_lock;
+        return 0;
+
+    /* VoLTE is UDP only. Exit fast for TCP/ICMP/RAW to save CPU */
+    if (sk->sk_protocol != IPPROTO_UDP)
+        return 0;
 
     rcu_read_lock();
-
-    /* Re-check under lock; socket could have been freed */
+    
+    /* Double check socket hasn't been freed/migrated during RCU grace period */
     if (!sk_fullsock(sk))
-        goto out_unlock;
+        goto out;
 
-    /* Only care about UDP (SIP/RTP are always UDP here) */
-    if (sk->sk_protocol != IPPROTO_UDP)
-        goto out_unlock;
+    if (sk->sk_family != AF_INET && sk->sk_family != AF_INET6)
+        goto out;
 
     inet = inet_sk(sk);
-
-    if (sk->sk_family == AF_INET || sk->sk_family == AF_INET6) {
-        /*
-         * inet_sport/inet_dport are valid for both AF_INET and
-         * AF_INET6 — they live in struct inet_sock which is the
-         * common base for inet6_sock on 4.14.
-         */
-        lport = inet->inet_sport;
-        rport = inet->inet_dport;
-
-        if (is_ims_port(lport) || is_ims_port(rport))
-            bypass = true;
+	
+    if (inet->inet_sport == IMS_PORT_SIP  || inet->inet_dport == IMS_PORT_SIP  ||
+        inet->inet_sport == IMS_PORT_SIPS || inet->inet_dport == IMS_PORT_SIPS ||
+        inet->inet_sport == IMS_PORT_RTP  || inet->inet_dport == IMS_PORT_RTP  ||
+        inet->inet_sport == IMS_PORT_RTCP || inet->inet_dport == IMS_PORT_RTCP) {
+        is_ims = 1;
     }
 
-out_unlock:
+out:
     rcu_read_unlock();
-
-out_no_lock:
+    return is_ims;
+}
+EXPORT_SYMBOL(volte_ims_bypass_check);
     /*
      * NF_ACCEPT = 1: allow packet, continue processing.
      * NF_DROP   = 0: silently kill packet — never return this
@@ -196,8 +176,6 @@ out_no_lock:
      * For a BPF cgroup prog returning 0 means DENY (EPERM to
      * userspace). Return 1 to allow.
      */
-    return 1; /* Always NF_ACCEPT; BPF logic above is observe-only */
-}
 
 int sk_filter_trim_cap(struct sock *sk, struct sk_buff *skb, unsigned int cap)
 {
@@ -222,7 +200,6 @@ if (err) {
         return err;
 }
 	//no editted below
-
 	err = security_sock_rcv_skb(sk, skb);
 	if (err)
 		return err;
