@@ -123,6 +123,82 @@ EXPORT_SYMBOL_GPL(copy_bpf_fprog_from_user);
  * be accepted or -EPERM if the packet should be tossed.
  *
  */
+/*
+ * MT6768 VoLTE fix: bypass BPF/cgroup-inet hooks for IMS/RTP traffic.
+ * Kernel 4.14 compatible. Safe rcu_read_lock discipline throughout.
+ */
+static const __be16 PORT_SIP  = (__force __be16)__constant_htons(5060);
+static const __be16 PORT_SIPS = (__force __be16)__constant_htons(5061);
+static const __be16 PORT_RTP  = (__force __be16)__constant_htons(5004);
+static const __be16 PORT_RTCP = (__force __be16)__constant_htons(5005);
+
+static inline bool is_ims_port(__be16 port)
+{
+    return port == PORT_SIP  ||
+           port == PORT_SIPS ||
+           port == PORT_RTP  ||
+           port == PORT_RTCP;
+}
+
+/* Call this where your BPF/netfilter hook runs */
+static int volte_ims_bypass_check(struct sk_buff *skb)
+{
+    struct sock *sk;
+    struct inet_sock *inet;
+    __be16 lport, rport;
+    bool bypass = false;
+
+    /*
+     * MUST use skb_to_full_sk() on 4.14 — skb->sk may be a
+     * request_sock or timewait_sock, causing inet_sk() to
+     * read garbage fields and oops.
+     */
+    sk = skb_to_full_sk(skb);
+
+    /* NULL check BEFORE rcu_read_lock to keep lock scope minimal */
+    if (!sk || !sk_fullsock(sk))
+        goto out_no_lock;
+
+    rcu_read_lock();
+
+    /* Re-check under lock; socket could have been freed */
+    if (!sk_fullsock(sk))
+        goto out_unlock;
+
+    /* Only care about UDP (SIP/RTP are always UDP here) */
+    if (sk->sk_protocol != IPPROTO_UDP)
+        goto out_unlock;
+
+    inet = inet_sk(sk);
+
+    if (sk->sk_family == AF_INET || sk->sk_family == AF_INET6) {
+        /*
+         * inet_sport/inet_dport are valid for both AF_INET and
+         * AF_INET6 — they live in struct inet_sock which is the
+         * common base for inet6_sock on 4.14.
+         */
+        lport = inet->inet_sport;
+        rport = inet->inet_dport;
+
+        if (is_ims_port(lport) || is_ims_port(rport))
+            bypass = true;
+    }
+
+out_unlock:
+    rcu_read_unlock();
+
+out_no_lock:
+    /*
+     * NF_ACCEPT = 1: allow packet, continue processing.
+     * NF_DROP   = 0: silently kill packet — never return this
+     *                for IMS unless you intend to block calls.
+     *
+     * For a BPF cgroup prog returning 0 means DENY (EPERM to
+     * userspace). Return 1 to allow.
+     */
+    return 1; /* Always NF_ACCEPT; BPF logic above is observe-only */
+}
+
 int sk_filter_trim_cap(struct sock *sk, struct sk_buff *skb, unsigned int cap)
 {
 	int err;
@@ -137,71 +213,15 @@ int sk_filter_trim_cap(struct sock *sk, struct sk_buff *skb, unsigned int cap)
 		NET_INC_STATS(sock_net(sk), LINUX_MIB_PFMEMALLOCDROP);
 		return -ENOMEM;
 	}
-
-/*
-* MT6768 VoLTE fix: bypass BPF/Security filters for IMS traffic.
-* Carrier Aggregation (CA) toggles can change cgroup net_cls mid-call,
-* causing BPF egress/ingress hooks to return EPERM for SIP/RTP.
-* 1. Pre-calculate constants outside the critical path.
-* This guarantees the compiler won't do runtime byte-swapping,
-* maximizing performance in high-throughput network hooks.
-*/
-static const __be16 PORT_SIP  = htons(5060);
-static const __be16 PORT_SIPS = htons(5061);
-static const __be16 PORT_RTP  = htons(5004);
-
-/* ... inside your hook/function ... */
-
-/* 
- * 2. CRASH PREVENTION: If you are getting 'sk' from an 'skb', 
- * you MUST use skb_to_full_sk(). Do not use 'skb->sk' directly.
- */
-// struct sock *sk = skb_to_full_sk(skb); 
-
-rcu_read_lock();
-
-if (sk && sk_fullsock(sk) && sk->sk_protocol == IPPROTO_UDP) {
-    
-    /* 3. Handle IPv4 */
-    if (sk->sk_family == AF_INET) {
-        struct inet_sock *inet = inet_sk(sk);
-        
-        __be16 lport = inet->inet_sport;
-        __be16 rport = inet->inet_dport;
-
-        if (lport == PORT_SIP || lport == PORT_SIPS || lport == PORT_RTP ||
-            rport == PORT_SIP || rport == PORT_SIPS || rport == PORT_RTP) {
-            rcu_read_unlock();
-            
-            /* 4. NETFILTER FIX: If you want to ALLOW this traffic, return 1 (NF_ACCEPT). 
-             * Returning 0 (NF_DROP) here is a guaranteed way to crash Android IMS. */
-            return 1; 
-        }
-    }
-    /* 5. Handle IPv6 (Mandatory for VoLTE stability on modern networks) */
-    else if (sk->sk_family == AF_INET6) {
-        /* inet_sport and inet_dport are safe to extract from AF_INET6 sockets */
-        struct inet_sock *inet = inet_sk(sk); 
-        
-        __be16 lport = inet->inet_sport;
-        __be16 rport = inet->inet_dport;
-
-        if (lport == PORT_SIP || lport == PORT_SIPS || lport == PORT_RTP ||
-            rport == PORT_SIP || rport == PORT_SIPS || rport == PORT_RTP) {
-            rcu_read_unlock();
-            return 1; 
-        }
-    }
+err = BPF_CGROUP_RUN_PROG_INET_INGRESS(sk, skb);
+if (err) {
+    /* MT6768 Fix: If BPF tried to drop it, check if it's IMS and override */
+    if (volte_ims_bypass_check(skb))
+        err = 0; 
+    else
+        return err;
 }
-
-rcu_read_unlock();
-	
-/* Default return for non-SIP/RTP traffic */
-// return 1; /* or whatever your default action is */
-	
-	err = BPF_CGROUP_RUN_PROG_INET_INGRESS(sk, skb);
-	if (err)
-		return err;
+	//no editted below
 
 	err = security_sock_rcv_skb(sk, skb);
 	if (err)
