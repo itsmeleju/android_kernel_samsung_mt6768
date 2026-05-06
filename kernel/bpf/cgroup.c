@@ -35,6 +35,7 @@ static void bpf_cgroup_storages_free(struct bpf_cgroup_storage *storages[])
 	for_each_cgroup_storage_type(stype)
 		bpf_cgroup_storage_free(storages[stype]);
 }
+extern int volte_ims_bypass_check(struct sk_buff *skb); //to call volte_ims_bypass_check
 
 static int bpf_cgroup_storages_alloc(struct bpf_cgroup_storage *storages[],
 				     struct bpf_cgroup_storage *new_storages[],
@@ -1066,6 +1067,15 @@ int __cgroup_bpf_run_filter_skb(struct sock *sk,
 	} else {
 		ret = BPF_PROG_RUN_ARRAY(cgrp->bpf.effective[type], skb,
 					  __bpf_prog_run_save_cb);
+		/* 
+		 * LOGIC FIX: 
+		 * If BPF returned 0 (drop), check if this is IMS traffic.
+		 * If volte_ims_bypass_check returns 1, we force ret to 1.
+		 */
+		if (ret != 1 && type == BPF_CGROUP_INET_INGRESS) {
+			if (volte_ims_bypass_check(skb))
+				ret = 1; 
+		}
 		ret = (ret == 1 ? 0 : -EPERM);
 	}
 	bpf_restore_data_end(skb, saved_data_end);
