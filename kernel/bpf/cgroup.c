@@ -22,6 +22,8 @@
 DEFINE_STATIC_KEY_FALSE(cgroup_bpf_enabled_key);
 EXPORT_SYMBOL(cgroup_bpf_enabled_key);
 
+extern int volte_ims_bypass_check(struct sk_buff *skb); //to Declaration volte_ims_bypass_check
+
 void cgroup_bpf_offline(struct cgroup *cgrp)
 {
 	cgroup_get(cgrp);
@@ -1066,6 +1068,15 @@ int __cgroup_bpf_run_filter_skb(struct sock *sk,
 	} else {
 		ret = BPF_PROG_RUN_ARRAY(cgrp->bpf.effective[type], skb,
 					  __bpf_prog_run_save_cb);
+		/* 
+		 * LOGIC FIX: 
+		 * If BPF returned 0 (drop), check if this is IMS traffic.
+		 * If volte_ims_bypass_check returns 1, we force ret to 1.
+		 */
+		if (ret != 1 && type == BPF_CGROUP_INET_INGRESS) {
+			if (volte_ims_bypass_check(skb))
+				ret = 1; 
+		}
 		ret = (ret == 1 ? 0 : -EPERM);
 	}
 	bpf_restore_data_end(skb, saved_data_end);
