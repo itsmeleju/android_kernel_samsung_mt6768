@@ -81,6 +81,11 @@
 #include <linux/btf_ids.h>
 #include <net/tls.h>
 
+#define IMS_PORT_SIP   ((__be16)0x9413) /* 5060 */
+#define IMS_PORT_SIPS  ((__be16)0x9513) /* 5061 */
+#define IMS_PORT_RTP   ((__be16)0x8C13) /* 5004 */
+#define IMS_PORT_RTCP  ((__be16)0x8D13) /* 5005 */
+
 /* Keep the struct bpf_fib_lookup small so that it fits into a cacheline */
 static_assert(sizeof(struct bpf_fib_lookup) == 64, "struct bpf_fib_lookup size check");
 
@@ -110,7 +115,7 @@ int copy_bpf_fprog_from_user(struct sock_fprog *dst, sockptr_t src, int len)
 }
 EXPORT_SYMBOL_GPL(copy_bpf_fprog_from_user);
 
-/**
+/*
  *	sk_filter_trim_cap - run a packet through a socket filter
  *	@sk: sock associated with &sk_buff
  *	@skb: buffer to filter
@@ -121,8 +126,57 @@ EXPORT_SYMBOL_GPL(copy_bpf_fprog_from_user);
  * than pkt_len we keep whole skb->data. This is the socket level
  * wrapper to BPF_PROG_RUN. It returns 0 if the packet should
  * be accepted or -EPERM if the packet should be tossed.
- *
+ * MT6768 VoLTE fix: bypass BPF/cgroup-inet hooks for IMS/RTP traffic.
+ * Kernel 4.14 compatible. Safe rcu_read_lock discipline throughout.
+ * helper function: NOT static so other files (cgroup.o) can link to it.
  */
+int volte_ims_bypass_check(struct sk_buff *skb)
+{
+    struct sock *sk;
+    struct inet_sock *inet;
+    int is_ims = 0;
+
+    /* 4.14 safety: avoid request_sock pointers which cause oops/crash */
+    sk = skb_to_full_sk(skb);
+    if (!sk || !sk_fullsock(sk))
+        return 0;
+
+    /* VoLTE is UDP only. Exit fast for TCP/ICMP/RAW to save CPU */
+    if (sk->sk_protocol != IPPROTO_UDP)
+        return 0;
+
+    rcu_read_lock();
+    
+    /* Double check socket hasn't been freed/migrated during RCU grace period */
+    if (!sk_fullsock(sk))
+        goto out;
+
+    if (sk->sk_family != AF_INET && sk->sk_family != AF_INET6)
+        goto out;
+
+    inet = inet_sk(sk);
+	
+    if (inet->inet_sport == IMS_PORT_SIP  || inet->inet_dport == IMS_PORT_SIP  ||
+        inet->inet_sport == IMS_PORT_SIPS || inet->inet_dport == IMS_PORT_SIPS ||
+        inet->inet_sport == IMS_PORT_RTP  || inet->inet_dport == IMS_PORT_RTP  ||
+        inet->inet_sport == IMS_PORT_RTCP || inet->inet_dport == IMS_PORT_RTCP) {
+        is_ims = 1;
+    }
+
+out:
+    rcu_read_unlock();
+    return is_ims;
+}
+EXPORT_SYMBOL(volte_ims_bypass_check);
+    /*
+     * NF_ACCEPT = 1: allow packet, continue processing.
+     * NF_DROP   = 0: silently kill packet — never return this
+     *                for IMS unless you intend to block calls.
+     *
+     * For a BPF cgroup prog returning 0 means DENY (EPERM to
+     * userspace). Return 1 to allow.
+     */
+
 int sk_filter_trim_cap(struct sock *sk, struct sk_buff *skb, unsigned int cap)
 {
 	int err;
@@ -137,10 +191,15 @@ int sk_filter_trim_cap(struct sock *sk, struct sk_buff *skb, unsigned int cap)
 		NET_INC_STATS(sock_net(sk), LINUX_MIB_PFMEMALLOCDROP);
 		return -ENOMEM;
 	}
-	err = BPF_CGROUP_RUN_PROG_INET_INGRESS(sk, skb);
-	if (err)
-		return err;
-
+err = BPF_CGROUP_RUN_PROG_INET_INGRESS(sk, skb);
+if (err) {
+    /* MT6768 Fix: If BPF tried to drop it, check if it's IMS and override */
+    if (volte_ims_bypass_check(skb))
+        err = 0; 
+    else
+        return err;
+}
+	//no editted below
 	err = security_sock_rcv_skb(sk, skb);
 	if (err)
 		return err;
