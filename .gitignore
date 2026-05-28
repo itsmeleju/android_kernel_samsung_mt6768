@@ -5,6 +5,6 @@ kernel_noobie_Build.sh
 kernel_noobie_arch.sh
 out_testing/
 KernelSU
-drivers/kernelsu/
+# drivers/kernelsu/
 build.log
-KernelSU/
+# KernelSU/
