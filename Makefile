@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-2.0
 VERSION = 4
 PATCHLEVEL = 14
-SUBLEVEL = 356
-EXTRAVERSION = -openela
-NAME = Petit Gorille
+SUBLEVEL =357
+EXTRAVERSION = -bpf
+NAME = NoobieKernel
 
 # *DOCUMENTATION*
 # To see a list of typical targets execute "make help"

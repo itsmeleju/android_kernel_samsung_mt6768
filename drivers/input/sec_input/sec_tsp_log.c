@@ -22,6 +22,7 @@
 
 #include "sec_input.h"
 #include "sec_tsp_log.h"
+#include <linux/proc_fs.h>
 
 static int sec_tsp_log_index;
 static int sec_tsp_log_index_fix;

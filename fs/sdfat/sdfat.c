@@ -54,14 +54,15 @@
 #include <linux/vmalloc.h>
 #include <asm/current.h>
 #include <asm/unaligned.h>
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 16, 0)
-#include <linux/iversion.h>
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0)
+//#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 16, 0)
+//#include <linux/iversion.h> // (no such file)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0)
 #include <linux/aio.h>
 #endif
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+//#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+//to avoid error when spoof 5.10 bpf
 #include <linux/random.h>
-#endif
+//#endif
 
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3, 0, 0)
@@ -5572,4 +5573,5 @@ module_exit(exit_sdfat_fs);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("FAT/exFAT filesystem support");
 MODULE_AUTHOR("Samsung Electronics Co., Ltd.");
+
 
