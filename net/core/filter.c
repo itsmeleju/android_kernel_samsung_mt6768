@@ -125,8 +125,16 @@ EXPORT_SYMBOL_GPL(copy_bpf_fprog_from_user);
  */
 int sk_filter_trim_cap(struct sock *sk, struct sk_buff *skb, unsigned int cap)
 {
-	int err;
 	struct sk_filter *filter;
+	int err;
+
+	/* * CRITICAL STABILITY FIX: Short-circuit local IPC and Netlink routing 
+	 * sockets. Returning 0 bypasses eBPF filters and allows packets through.
+	 */
+	if (sk) {
+		if (sk->sk_family == AF_UNIX || sk->sk_family == AF_NETLINK)
+			return 0; 
+	}
 
 	/*
 	 * If the skb was allocated from pfmemalloc reserves, only
@@ -1469,6 +1477,23 @@ EXPORT_SYMBOL_GPL(bpf_prog_destroy);
 static int __sk_attach_prog(struct bpf_prog *prog, struct sock *sk)
 {
 	struct sk_filter *fp, *old_fp;
+/* * CRITICAL STABILITY FIX: Prevent backported eBPF filtering hooks
+	 * from intercepting local IPC, routing, or Bluetooth streams on ARM32.
+	 * This prevents Binder timeouts (ServiceBindHelper) and Telecom NPEs.
+	 */
+	if (sk) {
+		switch (sk->sk_family) {
+		case AF_UNIX:
+		case AF_NETLINK:
+#ifdef AF_BLUETOOTH
+		case AF_BLUETOOTH:
+#endif
+			/* Reject attaching BPF filters to these internal sockets safely */
+			return -EOPNOTSUPP; 
+		default:
+			break;
+		}
+	}
 
 	fp = kmalloc(sizeof(*fp), GFP_KERNEL);
 	if (!fp)
@@ -1543,6 +1568,11 @@ int sk_attach_filter(struct sock_fprog *fprog, struct sock *sk)
 {
 	struct bpf_prog *prog = __get_filter(fprog, sk);
 	int err;
+  pr_info(
+    "BPF socket attach family=%d type=%d\n",
+    sk->sk_family,
+    sk->sk_type
+);
 
 	if (IS_ERR(prog))
 		return PTR_ERR(prog);
@@ -1586,9 +1616,20 @@ static struct bpf_prog *__get_bpf(u32 ufd, struct sock *sk)
 
 int sk_attach_bpf(u32 ufd, struct sock *sk)
 {
-	struct bpf_prog *prog = __get_bpf(ufd, sk);
+	struct bpf_prog *prog;
 	int err;
 
+#ifdef AF_BLUETOOTH
+	/* CRITICAL ARCHITECTURE FIX: Prevent backported BPF engines from binding 
+	 * to AF_BLUETOOTH sockets, ensuring stack call teardown sequences 
+	 * do not face a use-after-free null pointer dereference. by noobie */
+	if (sk && sk->sk_family == AF_BLUETOOTH) {
+		pr_warn_ratelimited("bpf: Rejected attachment to AF_BLUETOOTH socket to protect callback lifecycle\n");
+		return -EINVAL;
+	}
+#endif
+
+	prog = __get_bpf(ufd, sk);
 	if (IS_ERR(prog))
 		return PTR_ERR(prog);
 

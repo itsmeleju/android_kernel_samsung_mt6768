@@ -1826,6 +1826,13 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *prog)
 	unsigned int tmp_idx;
 	unsigned int image_size;
 	u8 *image_ptr;
+/* CRITICAL ARM32 STABILITY FIX: Fall back directly to the safe 
+	 * software interpreter for standard socket filters. This avoids 
+	 * 64-bit alignment/timer JIT glitches on legacy a32 hardware. */
+	if (prog->type == BPF_PROG_TYPE_SOCKET_FILTER) {
+		prog->jited = 0;
+		return orig_prog;
+	}
 
 	/* If BPF JIT was not enabled then we must fall back to
 	 * the interpreter.
@@ -1965,4 +1972,5 @@ out:
 					   tmp : orig_prog);
 	return prog;
 }
+
 
