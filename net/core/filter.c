@@ -80,6 +80,14 @@
 #include <net/transp_v6.h>
 #include <linux/btf_ids.h>
 #include <net/tls.h>
+/* ==========================================================================
+ * SAMSUNG A32 LEGACY 4.14 eBPF COMPATIBILITY LAYER
+ * ========================================================================== */
+#define LEGACY_414_SKB_FAMILY      88
+#define LEGACY_414_SKB_REMOTE_IP4  92
+#define LEGACY_414_SKB_LOCAL_IP4   96
+#define LEGACY_414_SKB_REMOTE_PORT 132
+#define LEGACY_414_SKB_LOCAL_PORT  136
 
 /* Keep the struct bpf_fib_lookup small so that it fits into a cacheline */
 static_assert(sizeof(struct bpf_fib_lookup) == 64, "struct bpf_fib_lookup size check");
@@ -128,12 +136,10 @@ int sk_filter_trim_cap(struct sock *sk, struct sk_buff *skb, unsigned int cap)
 	struct sk_filter *filter;
 	int err;
 
-	/* * CRITICAL STABILITY FIX: Short-circuit local IPC and Netlink routing 
-	 * sockets. Returning 0 bypasses eBPF filters and allows packets through.
-	 */
+	/* CRITICAL: SHORT-CIRCUIT LOCAL IPC AND NETLINK SOCKET FAMILIES */
 	if (sk) {
 		if (sk->sk_family == AF_UNIX || sk->sk_family == AF_NETLINK)
-			return 0; 
+			return 0;
 	}
 
 	/*
@@ -218,6 +224,7 @@ BPF_CALL_3(bpf_skb_get_nlattr_nest, struct sk_buff *, skb, u32, a, u32, x)
 
 	return 0;
 }
+//below bpf sucks-noobie
 
 static int bpf_skb_load_helper_convert_offset(const struct sk_buff *skb, int offset)
 {
@@ -489,6 +496,9 @@ static bool convert_bpf_extensions(struct sock_filter *fp,
 	return true;
 }
 
+// In the convert_bpf_ld_abs function, replace the early return logic
+// with 4.14-style fallback that uses helper calls
+
 static bool convert_bpf_ld_abs(struct sock_filter *fp, struct bpf_insn **insnp)
 {
 	const bool unaligned_ok = IS_BUILTIN(CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS);
@@ -526,37 +536,32 @@ static bool convert_bpf_ld_abs(struct sock_filter *fp, struct bpf_insn **insnp)
 		*insn++ = BPF_JMP_A(8);
 	}
 
-	*insn++ = BPF_MOV64_REG(BPF_REG_ARG1, BPF_REG_CTX);
-	*insn++ = BPF_MOV64_REG(BPF_REG_ARG2, BPF_REG_D);
-	*insn++ = BPF_MOV64_REG(BPF_REG_ARG3, BPF_REG_H);
-	if (!indirect) {
-		*insn++ = BPF_MOV64_IMM(BPF_REG_ARG4, offset);
-	} else {
-		*insn++ = BPF_MOV64_REG(BPF_REG_ARG4, BPF_REG_X);
-		if (fp->k)
-			*insn++ = BPF_ALU64_IMM(BPF_ADD, BPF_REG_ARG4, offset);
-	}
-
+	/* SAMSUNG_A32_4_14_COMPAT: USE HELPER CALL FALLBACK FOR ALL CASES */
 	switch (BPF_SIZE(fp->code)) {
 	case BPF_B:
-		*insn++ = BPF_EMIT_CALL(bpf_skb_load_helper_8);
-		break;
 	case BPF_H:
-		*insn++ = BPF_EMIT_CALL(bpf_skb_load_helper_16);
-		break;
 	case BPF_W:
-		*insn++ = BPF_EMIT_CALL(bpf_skb_load_helper_32);
-		break;
+		/* FORCE LEGACY HANDLER FOR 4.14 OFFSET COMPATIBILITY */
+		*insn++ = BPF_MOV64_REG(BPF_REG_ARG1, BPF_REG_CTX);
+		*insn++ = BPF_MOV64_REG(BPF_REG_ARG2, BPF_REG_D);
+		*insn++ = BPF_MOV64_REG(BPF_REG_ARG3, BPF_REG_H);
+		if (!indirect) {
+			*insn++ = BPF_MOV64_IMM(BPF_REG_ARG4, offset);
+		} else {
+			*insn++ = BPF_MOV64_REG(BPF_REG_ARG4, BPF_REG_X);
+			if (fp->k)
+				*insn++ = BPF_ALU64_IMM(BPF_ADD, BPF_REG_ARG4, offset);
+		}
+
+		*insn++ = BPF_JMP_IMM(BPF_JSGE, BPF_REG_A, 0, 2);
+		*insn++ = BPF_ALU32_REG(BPF_XOR, BPF_REG_A, BPF_REG_A);
+		*insn   = BPF_EXIT_INSN();
+
+		*insnp = insn;
+		return true;
 	default:
 		return false;
 	}
-
-	*insn++ = BPF_JMP_IMM(BPF_JSGE, BPF_REG_A, 0, 2);
-	*insn++ = BPF_ALU32_REG(BPF_XOR, BPF_REG_A, BPF_REG_A);
-	*insn   = BPF_EXIT_INSN();
-
-	*insnp = insn;
-	return true;
 }
 
 /**
@@ -8177,6 +8182,18 @@ static bool sock_ops_is_valid_access(int off, int size,
 {
 	const int size_default = sizeof(__u32);
 
+/* Intercept Samsung 4.14 legacy offsets before the size boundary checks */
+	if (type == BPF_READ) {
+		switch (off) {
+		case LEGACY_414_SKB_FAMILY:
+		case LEGACY_414_SKB_REMOTE_IP4:
+		case LEGACY_414_SKB_LOCAL_IP4:
+		case LEGACY_414_SKB_REMOTE_PORT:
+		case LEGACY_414_SKB_LOCAL_PORT:
+			return size == size_default;
+		}
+	}
+
 	if (off < 0 || off >= sizeof(struct bpf_sock_ops))
 		return false;
 
@@ -9345,6 +9362,8 @@ static u32 sock_ops_convert_ctx_access(enum bpf_access_type type,
 					      off);
 		break;
 
+	/* 1. MERGED FAMILY HOOK */
+	case LEGACY_414_SKB_FAMILY:
 	case offsetof(struct bpf_sock_ops, family):
 		BUILD_BUG_ON(FIELD_SIZEOF(struct sock_common, skc_family) != 2);
 
@@ -9356,6 +9375,8 @@ static u32 sock_ops_convert_ctx_access(enum bpf_access_type type,
 				      offsetof(struct sock_common, skc_family));
 		break;
 
+	/* 2. MERGED REMOTE IP4 HOOK */
+	case LEGACY_414_SKB_REMOTE_IP4:
 	case offsetof(struct bpf_sock_ops, remote_ip4):
 		BUILD_BUG_ON(FIELD_SIZEOF(struct sock_common, skc_daddr) != 4);
 
@@ -9367,6 +9388,8 @@ static u32 sock_ops_convert_ctx_access(enum bpf_access_type type,
 				      offsetof(struct sock_common, skc_daddr));
 		break;
 
+	/* 3. MERGED LOCAL IP4 HOOK */
+	case LEGACY_414_SKB_LOCAL_IP4:
 	case offsetof(struct bpf_sock_ops, local_ip4):
 		BUILD_BUG_ON(FIELD_SIZEOF(struct sock_common,
 					  skc_rcv_saddr) != 4);
@@ -9380,8 +9403,40 @@ static u32 sock_ops_convert_ctx_access(enum bpf_access_type type,
 					       skc_rcv_saddr));
 		break;
 
+	/* 4. MERGED REMOTE PORT HOOK */
+	case LEGACY_414_SKB_REMOTE_PORT:
+	case offsetof(struct bpf_sock_ops, remote_port):
+		BUILD_BUG_ON(FIELD_SIZEOF(struct sock_common, skc_dport) != 2);
+
+		*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(
+						struct bpf_sock_ops_kern, sk),
+				      si->dst_reg, si->src_reg,
+				      offsetof(struct bpf_sock_ops_kern, sk));
+		*insn++ = BPF_LDX_MEM(BPF_H, si->dst_reg, si->dst_reg,
+				      bpf_target_off(struct sock_common,
+						     skc_dport,
+						     2, target_size));
+		*insn++ = BPF_ALU64_IMM(BPF_AND, si->dst_reg, 0xffff);
+		break;
+
+	/* 5. MERGED LOCAL PORT HOOK */
+	case LEGACY_414_SKB_LOCAL_PORT:
+	case offsetof(struct bpf_sock_ops, local_port):
+		BUILD_BUG_ON(FIELD_SIZEOF(struct sock_common, skc_num) != 2);
+
+		*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(
+					      struct bpf_sock_ops_kern, sk),
+				      si->dst_reg, si->src_reg,
+				      offsetof(struct bpf_sock_ops_kern, sk));
+		*insn++ = BPF_LDX_MEM(BPF_H, si->dst_reg, si->dst_reg,
+				      bpf_target_off(struct sock_common,
+						     skc_num,
+						     2, target_size));
+		break;
+
 	case offsetof(struct bpf_sock_ops, remote_ip6[0]) ...
 	     offsetof(struct bpf_sock_ops, remote_ip6[3]):
+
 #if IS_ENABLED(CONFIG_IPV6)
 		BUILD_BUG_ON(FIELD_SIZEOF(struct sock_common,
 					  skc_v6_daddr.s6_addr32[0]) != 4);

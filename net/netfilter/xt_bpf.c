@@ -100,7 +100,7 @@ static bool bpf_mt_v1(const struct sk_buff *skb, struct xt_action_param *par)
 {
 	const struct xt_bpf_info_v1 *info = par->matchinfo;
 
-	return !!bpf_prog_run_save_cb(info->filter, (struct sk_buff *) skb);
+	return !!BPF_PROG_RUN(info->filter, skb);
 }
 
 static void bpf_mt_destroy(const struct xt_mtdtor_param *par)

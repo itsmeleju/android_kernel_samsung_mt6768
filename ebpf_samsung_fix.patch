@@ -1,0 +1,109 @@
+diff --git a/net/core/filter.c b/net/core/filter.c
+index a1b2c3d..e5f6g7h 100644
+--- a/net/core/filter.c
++++ b/net/core/filter.c
+@@ -73,6 +73,15 @@
+ #include <net/sock_reuseport.h>
+ #include <net/busy_poll.h>
+ 
++/* ==========================================================================
++ * SAMSUNG A32 LEGACY 4.14 eBPF COMPATIBILITY LAYER
++ * ========================================================================== */
++#define LEGACY_414_SKB_FAMILY      88
++#define LEGACY_414_SKB_REMOTE_IP4  92
++#define LEGACY_414_SKB_LOCAL_IP4   96
++#define LEGACY_414_SKB_REMOTE_PORT 132
++#define LEGACY_414_SKB_LOCAL_PORT  136
++
+ static const struct bpf_func_proto *
+ bpf_sk_base_func_proto(enum bpf_func_id func_id);
+ 
+@@ -9180,6 +9189,20 @@ static bool sock_ops_is_valid_access(int off, int size,
+ {
+ 	const int size_default = sizeof(__u32);
+ 
++	/* CRITICAL CRASH PREVENTER: Samsung's legacy bytecode queries offsets 
++	 * based on 4.14 __sk_buff maps. Intercept them BEFORE the natively strict 
++	 * 'sizeof(struct bpf_sock_ops)' boundary check to avoid immediate verifier rejection.
++	 */
++	if (type == BPF_READ) {
++		switch (off) {
++		case LEGACY_414_SKB_FAMILY:
++		case LEGACY_414_SKB_REMOTE_IP4:
++		case LEGACY_414_SKB_LOCAL_IP4:
++		case LEGACY_414_SKB_REMOTE_PORT:
++		case LEGACY_414_SKB_LOCAL_PORT:
++			return size == size_default;
++		}
++	}
++
+ 	if (off < 0 || off >= sizeof(struct bpf_sock_ops))
+ 		return false;
+ 
+@@ -9300,6 +9323,61 @@ static u32 sock_ops_convert_ctx_access(enum bpf_access_type type,
+ 	struct bpf_insn *insn = insn_buf;
+ 	int off;
+ 
++	switch (si->off) {
++	/* Catch Samsung's legacy 4.14 structural offsets and stack them seamlessly 
++	 * with native 5.10 targets using internal kernel contexts safely.
++	 */
++	case LEGACY_414_SKB_LOCAL_IP4:
++	case offsetof(struct bpf_sock_ops, local_ip4):
++		BUILD_BUG_ON(FIELD_SIZEOF(struct sock_common, skc_rcv_saddr) != 4);
++		*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct bpf_sock_ops_kern, sk),
++				      si->dst_reg, si->src_reg,
++				      offsetof(struct bpf_sock_ops_kern, sk));
++		*insn++ = BPF_LDX_MEM(BPF_W, si->dst_reg, si->dst_reg,
++				      bpf_target_off(struct sock_common,
++						     skc_rcv_saddr,
++						     4, target_size));
++		break;
++
++	case LEGACY_414_SKB_REMOTE_IP4:
++	case offsetof(struct bpf_sock_ops, remote_ip4):
++		BUILD_BUG_ON(FIELD_SIZEOF(struct sock_common, skc_daddr) != 4);
++		*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct bpf_sock_ops_kern, sk),
++				      si->dst_reg, si->src_reg,
++				      offsetof(struct bpf_sock_ops_kern, sk));
++		*insn++ = BPF_LDX_MEM(BPF_W, si->dst_reg, si->dst_reg,
++				      bpf_target_off(struct sock_common,
++						     skc_daddr,
++						     4, target_size));
++		break;
++
++	case LEGACY_414_SKB_FAMILY:
++	case offsetof(struct bpf_sock_ops, family):
++		*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct bpf_sock_ops_kern, sk),
++				      si->dst_reg, si->src_reg,
++				      offsetof(struct bpf_sock_ops_kern, sk));
++		*insn++ = BPF_LDX_MEM(BPF_H, si->dst_reg, si->dst_reg,
++				      offsetof(struct sock_common, skc_family));
++		break;
++
++	case LEGACY_414_SKB_REMOTE_PORT:
++	case offsetof(struct bpf_sock_ops, remote_port):
++		BUILD_BUG_ON(FIELD_SIZEOF(struct sock_common, skc_dport) != 2);
++		*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct bpf_sock_ops_kern, sk),
++				      si->dst_reg, si->src_reg,
++				      offsetof(struct bpf_sock_ops_kern, sk));
++		*insn++ = BPF_LDX_MEM(BPF_H, si->dst_reg, si->dst_reg,
++				      bpf_target_off(struct sock_common,
++						     skc_dport,
++						     2, target_size));
++		*insn++ = BPF_ALU64_IMM(BPF_AND, si->dst_reg, 0xffff);
++		break;
++
++	case LEGACY_414_SKB_LOCAL_PORT:
++	case offsetof(struct bpf_sock_ops, local_port):
++		BUILD_BUG_ON(FIELD_SIZEOF(struct sock_common, skc_num) != 2);
++		*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(struct bpf_sock_ops_kern, sk),
++				      si->dst_reg, si->src_reg,
++				      offsetof(struct bpf_sock_ops_kern, sk));
++		*insn++ = BPF_LDX_MEM(BPF_H, si->dst_reg, si->dst_reg,
++				      bpf_target_off(struct sock_common,
++						     skc_num,
++						     2, target_size));
++		break;
++
+ 	case offsetof(struct bpf_sock_ops, op):

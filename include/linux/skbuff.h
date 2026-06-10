@@ -679,17 +679,11 @@ struct sk_buff {
 
 			union {
 				struct net_device	*dev;
-				/* Some protocols might use this space to store information,
-				 * while device pointer would be NULL.
-				 * UDP receive path is one user.
-				 */
 				unsigned long		dev_scratch;
 			};
 		};
-		struct rb_node		rbnode; /* used in netem, ip4 defrag, and tcp stack */
-#ifndef NET_RX_BATCH_SOLUTION
+		struct rb_node		rbnode;
 		struct list_head	list;
-#endif
 	};
 
 	union {
@@ -701,16 +695,10 @@ struct sk_buff {
 		ktime_t		tstamp;
 		u64		skb_mstamp;
 	};
-	/*
-	 * This is the control buffer. It is free to use for every
-	 * layer. Please put your private variables there. If you
-	 * want to keep them across layers you have to do a skb_clone()
-	 * first. This is owned by whoever has the skb queued ATM.
-	 */
+
+	/* This is the control buffer. It must remain perfectly aligned. */
 	char			cb[48] __aligned(8);
-#ifdef NET_RX_BATCH_SOLUTION
-	struct list_head list;
-#endif
+
 	unsigned long		_skb_refdst;
 	void			(*destructor)(struct sk_buff *skb);
 #ifdef CONFIG_XFRM
@@ -727,12 +715,8 @@ struct sk_buff {
 	__u16			mac_len,
 				hdr_len;
 
-	/* Following fields are _not_ copied in __copy_skb_header()
-	 * Note that queue_mapping is here mostly to fill a hole.
-	 */
 	__u16			queue_mapping;
 
-/* if you move cloned around you also must adapt those constants */
 #ifdef __BIG_ENDIAN_BITFIELD
 #define CLONED_MASK	(1 << 7)
 #else
@@ -756,7 +740,6 @@ struct sk_buff {
 	__u32			headers_start[0];
 	/* public: */
 
-/* if you move pkt_type around you also must adapt those constants */
 #ifdef __BIG_ENDIAN_BITFIELD
 #define PKT_TYPE_MAX	(7 << 5)
 #else
@@ -776,7 +759,6 @@ struct sk_buff {
 	__u8			wifi_acked_valid:1;
 	__u8			wifi_acked:1;
 	__u8			no_fcs:1;
-	/* Indicates the inner headers are valid in the skbuff. */
 	__u8			encapsulation:1;
 	__u8			encap_hdr_csum:1;
 	__u8			csum_valid:1;
@@ -803,7 +785,7 @@ struct sk_buff {
 #endif
 
 #ifdef CONFIG_NET_SCHED
-	__u16			tc_index;	/* traffic control index */
+	__u16			tc_index;
 #endif
 
 	union {
@@ -851,7 +833,7 @@ struct sk_buff {
 	__u32			headers_end[0];
 	/* public: */
 
-	/* These elements must be at the end, see alloc_skb() for details.  */
+	/* Data path pointers strictly concluding the layout */
 	sk_buff_data_t		tail;
 	sk_buff_data_t		end;
 	unsigned char		*head,
@@ -859,7 +841,6 @@ struct sk_buff {
 	unsigned int		truesize;
 	refcount_t		users;
 };
-
 #ifdef __KERNEL__
 /*
  *	Handling routines are only of interest to the kernel
