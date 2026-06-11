@@ -80,6 +80,17 @@
 #include <net/transp_v6.h>
 #include <linux/btf_ids.h>
 #include <net/tls.h>
+/* NOTE: These constant definitions reflect structural field offsets from the 
+ * legacy 4.14 kernel. They are intercepted here to maintain backward binary 
+ * compatibility with older Samsung vendor blobs (e.g., VoLTE/Wi-Fi calling hooks).
+ */
+ #define LEGACY_414_SKB_FAMILY      88
+ #define LEGACY_414_SKB_REMOTE_IP4  92
+ #define LEGACY_414_SKB_LOCAL_IP4   96
+ #define LEGACY_414_SKB_REMOTE_PORT 132
+ #define LEGACY_414_SKB_LOCAL_PORT  136
+
+static_assert(LEGACY_414_SKB_FAMILY < sizeof(struct __sk_buff), "Legacy offset boundary overflow check");
 
 /* Keep the struct bpf_fib_lookup small so that it fits into a cacheline */
 static_assert(sizeof(struct bpf_fib_lookup) == 64, "struct bpf_fib_lookup size check");
@@ -128,12 +139,10 @@ int sk_filter_trim_cap(struct sock *sk, struct sk_buff *skb, unsigned int cap)
 	struct sk_filter *filter;
 	int err;
 
-	/* * CRITICAL STABILITY FIX: Short-circuit local IPC and Netlink routing 
-	 * sockets. Returning 0 bypasses eBPF filters and allows packets through.
-	 */
+	/* CRITICAL: SHORT-CIRCUIT LOCAL IPC AND NETLINK SOCKET FAMILIES */
 	if (sk) {
 		if (sk->sk_family == AF_UNIX || sk->sk_family == AF_NETLINK)
-			return 0; 
+			return 0;
 	}
 
 	/*
@@ -218,6 +227,7 @@ BPF_CALL_3(bpf_skb_get_nlattr_nest, struct sk_buff *, skb, u32, a, u32, x)
 
 	return 0;
 }
+//below bpf sucks-noobie
 
 static int bpf_skb_load_helper_convert_offset(const struct sk_buff *skb, int offset)
 {
@@ -489,6 +499,9 @@ static bool convert_bpf_extensions(struct sock_filter *fp,
 	return true;
 }
 
+// In the convert_bpf_ld_abs function, replace the early return logic
+// with 4.14-style fallback that uses helper calls
+
 static bool convert_bpf_ld_abs(struct sock_filter *fp, struct bpf_insn **insnp)
 {
 	const bool unaligned_ok = IS_BUILTIN(CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS);
@@ -526,37 +539,32 @@ static bool convert_bpf_ld_abs(struct sock_filter *fp, struct bpf_insn **insnp)
 		*insn++ = BPF_JMP_A(8);
 	}
 
-	*insn++ = BPF_MOV64_REG(BPF_REG_ARG1, BPF_REG_CTX);
-	*insn++ = BPF_MOV64_REG(BPF_REG_ARG2, BPF_REG_D);
-	*insn++ = BPF_MOV64_REG(BPF_REG_ARG3, BPF_REG_H);
-	if (!indirect) {
-		*insn++ = BPF_MOV64_IMM(BPF_REG_ARG4, offset);
-	} else {
-		*insn++ = BPF_MOV64_REG(BPF_REG_ARG4, BPF_REG_X);
-		if (fp->k)
-			*insn++ = BPF_ALU64_IMM(BPF_ADD, BPF_REG_ARG4, offset);
-	}
-
+	/* SAMSUNG_A32_4_14_COMPAT: USE HELPER CALL FALLBACK FOR ALL CASES */
 	switch (BPF_SIZE(fp->code)) {
 	case BPF_B:
-		*insn++ = BPF_EMIT_CALL(bpf_skb_load_helper_8);
-		break;
 	case BPF_H:
-		*insn++ = BPF_EMIT_CALL(bpf_skb_load_helper_16);
-		break;
 	case BPF_W:
-		*insn++ = BPF_EMIT_CALL(bpf_skb_load_helper_32);
-		break;
+		/* FORCE LEGACY HANDLER FOR 4.14 OFFSET COMPATIBILITY */
+		*insn++ = BPF_MOV64_REG(BPF_REG_ARG1, BPF_REG_CTX);
+		*insn++ = BPF_MOV64_REG(BPF_REG_ARG2, BPF_REG_D);
+		*insn++ = BPF_MOV64_REG(BPF_REG_ARG3, BPF_REG_H);
+		if (!indirect) {
+			*insn++ = BPF_MOV64_IMM(BPF_REG_ARG4, offset);
+		} else {
+			*insn++ = BPF_MOV64_REG(BPF_REG_ARG4, BPF_REG_X);
+			if (fp->k)
+				*insn++ = BPF_ALU64_IMM(BPF_ADD, BPF_REG_ARG4, offset);
+		}
+
+		*insn++ = BPF_JMP_IMM(BPF_JSGE, BPF_REG_A, 0, 2);
+		*insn++ = BPF_ALU32_REG(BPF_XOR, BPF_REG_A, BPF_REG_A);
+		*insn   = BPF_EXIT_INSN();
+
+		*insnp = insn;
+		return true;
 	default:
 		return false;
 	}
-
-	*insn++ = BPF_JMP_IMM(BPF_JSGE, BPF_REG_A, 0, 2);
-	*insn++ = BPF_ALU32_REG(BPF_XOR, BPF_REG_A, BPF_REG_A);
-	*insn   = BPF_EXIT_INSN();
-
-	*insnp = insn;
-	return true;
 }
 
 /**
@@ -1568,11 +1576,6 @@ int sk_attach_filter(struct sock_fprog *fprog, struct sock *sk)
 {
 	struct bpf_prog *prog = __get_filter(fprog, sk);
 	int err;
-  pr_info(
-    "BPF socket attach family=%d type=%d\n",
-    sk->sk_family,
-    sk->sk_type
-);
 
 	if (IS_ERR(prog))
 		return PTR_ERR(prog);
@@ -8177,6 +8180,18 @@ static bool sock_ops_is_valid_access(int off, int size,
 {
 	const int size_default = sizeof(__u32);
 
+/* Intercept Samsung 4.14 legacy offsets before the size boundary checks */
+	if (type == BPF_READ) {
+		switch (off) {
+		case LEGACY_414_SKB_FAMILY:
+		case LEGACY_414_SKB_REMOTE_IP4:
+		case LEGACY_414_SKB_LOCAL_IP4:
+		case LEGACY_414_SKB_REMOTE_PORT:
+		case LEGACY_414_SKB_LOCAL_PORT:
+			return size == size_default;
+		}
+	}
+
 	if (off < 0 || off >= sizeof(struct bpf_sock_ops))
 		return false;
 
@@ -8410,9 +8425,31 @@ static u32 bpf_convert_ctx_access(enum bpf_access_type type,
 				  struct bpf_prog *prog, u32 *target_size)
 {
 	struct bpf_insn *insn = insn_buf;
-	int off;
+	int off = si->off; /* 1. Initialize 'off' with the instruction offset */
 
-	switch (si->off) {
+	/* 2. Handle legacy 4.14 Samsung vendor blob context offsets safely */
+	switch (off) {
+	case LEGACY_414_SKB_FAMILY:
+		off = offsetof(struct __sk_buff, family);
+		break;
+	case LEGACY_414_SKB_REMOTE_IP4:
+		off = offsetof(struct __sk_buff, remote_ip4);
+		break;
+	case LEGACY_414_SKB_LOCAL_IP4:
+		off = offsetof(struct __sk_buff, local_ip4);
+		break;
+	case LEGACY_414_SKB_REMOTE_PORT:
+		off = offsetof(struct __sk_buff, remote_port);
+		break;
+	case LEGACY_414_SKB_LOCAL_PORT:
+		off = offsetof(struct __sk_buff, local_port);
+		break;
+	default:
+		break;
+	}
+
+	/* 3. Change this switch from 'si->off' to evaluate our updated 'off' variable */
+	switch (off) {
 	case offsetof(struct __sk_buff, len):
 		*insn++ = BPF_LDX_MEM(BPF_W, si->dst_reg, si->src_reg,
 				      bpf_target_off(struct sk_buff, len, 4,
@@ -9183,8 +9220,18 @@ static u32 sock_ops_convert_ctx_access(enum bpf_access_type type,
 				       u32 *target_size)
 {
 	struct bpf_insn *insn = insn_buf;
-	int off;
+	int off = si->off; /* 1. Initialize 'off' from the instruction structure */
 
+	/* 2. Insert the adapted guard check for legacy ports */
+	if (off == LEGACY_414_SKB_REMOTE_PORT || off == LEGACY_414_SKB_LOCAL_PORT) {
+		*target_size = 4;
+		*insn++ = BPF_LDX_MEM(BPF_W, si->dst_reg, si->src_reg, 
+				      (off == LEGACY_414_SKB_REMOTE_PORT) ? 
+				      offsetof(struct bpf_sock_ops, remote_port) : 
+				      offsetof(struct bpf_sock_ops, local_port));
+		return insn - insn_buf;
+	}
+	
 /* Helper macro for adding read access to tcp_sock or sock fields. */
 #define SOCK_OPS_GET_FIELD(BPF_FIELD, OBJ_FIELD, OBJ)			      \
 	do {								      \
@@ -9345,6 +9392,8 @@ static u32 sock_ops_convert_ctx_access(enum bpf_access_type type,
 					      off);
 		break;
 
+	/* 1. MERGED FAMILY HOOK */
+	case LEGACY_414_SKB_FAMILY:
 	case offsetof(struct bpf_sock_ops, family):
 		BUILD_BUG_ON(FIELD_SIZEOF(struct sock_common, skc_family) != 2);
 
@@ -9356,6 +9405,8 @@ static u32 sock_ops_convert_ctx_access(enum bpf_access_type type,
 				      offsetof(struct sock_common, skc_family));
 		break;
 
+	/* 2. MERGED REMOTE IP4 HOOK */
+	case LEGACY_414_SKB_REMOTE_IP4:
 	case offsetof(struct bpf_sock_ops, remote_ip4):
 		BUILD_BUG_ON(FIELD_SIZEOF(struct sock_common, skc_daddr) != 4);
 
@@ -9367,6 +9418,8 @@ static u32 sock_ops_convert_ctx_access(enum bpf_access_type type,
 				      offsetof(struct sock_common, skc_daddr));
 		break;
 
+	/* 3. MERGED LOCAL IP4 HOOK */
+	case LEGACY_414_SKB_LOCAL_IP4:
 	case offsetof(struct bpf_sock_ops, local_ip4):
 		BUILD_BUG_ON(FIELD_SIZEOF(struct sock_common,
 					  skc_rcv_saddr) != 4);
@@ -9380,8 +9433,40 @@ static u32 sock_ops_convert_ctx_access(enum bpf_access_type type,
 					       skc_rcv_saddr));
 		break;
 
+	/* 4. MERGED REMOTE PORT HOOK */
+	case LEGACY_414_SKB_REMOTE_PORT:
+	case offsetof(struct bpf_sock_ops, remote_port):
+		BUILD_BUG_ON(FIELD_SIZEOF(struct sock_common, skc_dport) != 2);
+
+		*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(
+						struct bpf_sock_ops_kern, sk),
+				      si->dst_reg, si->src_reg,
+				      offsetof(struct bpf_sock_ops_kern, sk));
+		*insn++ = BPF_LDX_MEM(BPF_H, si->dst_reg, si->dst_reg,
+				      bpf_target_off(struct sock_common,
+						     skc_dport,
+						     2, target_size));
+		*insn++ = BPF_ALU64_IMM(BPF_AND, si->dst_reg, 0xffff);
+		break;
+
+	/* 5. MERGED LOCAL PORT HOOK */
+	case LEGACY_414_SKB_LOCAL_PORT:
+	case offsetof(struct bpf_sock_ops, local_port):
+		BUILD_BUG_ON(FIELD_SIZEOF(struct sock_common, skc_num) != 2);
+
+		*insn++ = BPF_LDX_MEM(BPF_FIELD_SIZEOF(
+					      struct bpf_sock_ops_kern, sk),
+				      si->dst_reg, si->src_reg,
+				      offsetof(struct bpf_sock_ops_kern, sk));
+		*insn++ = BPF_LDX_MEM(BPF_H, si->dst_reg, si->dst_reg,
+				      bpf_target_off(struct sock_common,
+						     skc_num,
+						     2, target_size));
+		break;
+
 	case offsetof(struct bpf_sock_ops, remote_ip6[0]) ...
 	     offsetof(struct bpf_sock_ops, remote_ip6[3]):
+
 #if IS_ENABLED(CONFIG_IPV6)
 		BUILD_BUG_ON(FIELD_SIZEOF(struct sock_common,
 					  skc_v6_daddr.s6_addr32[0]) != 4);
@@ -10344,85 +10429,88 @@ static u32 sk_lookup_convert_ctx_access(enum bpf_access_type type,
 					u32 *target_size)
 {
 	struct bpf_insn *insn = insn_buf;
+	u32 off = si->off; 
 
-	switch (si->off) {
+	/* 1. Safely normalize legacy hooks */
+	if (off == LEGACY_414_SKB_REMOTE_PORT)
+		off = offsetof(struct bpf_sk_lookup, remote_port);
+	else if (off == LEGACY_414_SKB_LOCAL_PORT)
+		off = offsetof(struct bpf_sk_lookup, local_port);
+	else if (off == LEGACY_414_SKB_REMOTE_IP4 || off == LEGACY_414_SKB_LOCAL_IP4 || off == LEGACY_414_SKB_FAMILY)
+		return 0; /* Unsupported lookups dropped cleanly */
+
+	/* 2. Process accesses based on normalized offset */
+	switch (off) {
 	case offsetof(struct bpf_sk_lookup, sk):
 		*insn++ = BPF_LDX_MEM(BPF_SIZEOF(void *), si->dst_reg, si->src_reg,
 				      offsetof(struct bpf_sk_lookup_kern, selected_sk));
 		break;
+        
+	case offsetof(struct bpf_sk_lookup, remote_port):
+		BUILD_BUG_ON(sizeof_field(struct sock_common, skc_dport) != 2);
 
-	case offsetof(struct bpf_sk_lookup, family):
-		*insn++ = BPF_LDX_MEM(BPF_H, si->dst_reg, si->src_reg,
-				      bpf_target_off(struct bpf_sk_lookup_kern,
-						     family, 2, target_size));
+		*insn++ = BPF_LDX_MEM(sizeof_field(struct bpf_sk_lookup_kern, sk),
+				      si->dst_reg, si->src_reg,
+				      offsetof(struct bpf_sk_lookup_kern, sk)); 
+		*insn++ = BPF_LDX_MEM(BPF_H, si->dst_reg, si->dst_reg,
+				      bpf_target_off(struct sock_common, skc_dport, 2, target_size));
+		*insn++ = BPF_ALU64_IMM(BPF_AND, si->dst_reg, 0xffff);
 		break;
 
-	case offsetof(struct bpf_sk_lookup, protocol):
-		*insn++ = BPF_LDX_MEM(BPF_H, si->dst_reg, si->src_reg,
-				      bpf_target_off(struct bpf_sk_lookup_kern,
-						     protocol, 2, target_size));
+	case offsetof(struct bpf_sk_lookup, local_port):
+		BUILD_BUG_ON(sizeof_field(struct sock_common, skc_num) != 2);
+
+		*insn++ = BPF_LDX_MEM(sizeof_field(struct bpf_sk_lookup_kern, sk),
+				      si->dst_reg, si->src_reg,
+				      offsetof(struct bpf_sk_lookup_kern, sk)); 
+		*insn++ = BPF_LDX_MEM(BPF_H, si->dst_reg, si->dst_reg,
+				      bpf_target_off(struct sock_common, skc_num, 2, target_size));
 		break;
 
 	case offsetof(struct bpf_sk_lookup, remote_ip4):
 		*insn++ = BPF_LDX_MEM(BPF_W, si->dst_reg, si->src_reg,
-				      bpf_target_off(struct bpf_sk_lookup_kern,
-						     v4.saddr, 4, target_size));
+				      bpf_target_off(struct bpf_sk_lookup_kern, v4.saddr, 4, target_size));
 		break;
 
 	case offsetof(struct bpf_sk_lookup, local_ip4):
 		*insn++ = BPF_LDX_MEM(BPF_W, si->dst_reg, si->src_reg,
-				      bpf_target_off(struct bpf_sk_lookup_kern,
-						     v4.daddr, 4, target_size));
+				      bpf_target_off(struct bpf_sk_lookup_kern, v4.daddr, 4, target_size));
 		break;
 
-	case bpf_ctx_range_till(struct bpf_sk_lookup,
-				remote_ip6[0], remote_ip6[3]): {
+	case bpf_ctx_range_till(struct bpf_sk_lookup, remote_ip6[0], remote_ip6[3]): {
 #if IS_ENABLED(CONFIG_IPV6)
-		int off = si->off;
+		int off_v6 = si->off;
 
-		off -= offsetof(struct bpf_sk_lookup, remote_ip6[0]);
-		off += bpf_target_off(struct in6_addr, s6_addr32[0], 4, target_size);
-		*insn++ = BPF_LDX_MEM(BPF_SIZEOF(void *), si->dst_reg, si->src_reg,
-				      offsetof(struct bpf_sk_lookup_kern, v6.saddr));
-		*insn++ = BPF_JMP_IMM(BPF_JEQ, si->dst_reg, 0, 1);
-		*insn++ = BPF_LDX_MEM(BPF_W, si->dst_reg, si->dst_reg, off);
+		/* Calculate exactly where the requested array element sits in the kernel struct */
+		off_v6 -= offsetof(struct bpf_sk_lookup, remote_ip6[0]);
+		off_v6 += offsetof(struct bpf_sk_lookup_kern, v6.saddr);
+
+		/* Read the 4-byte chunk directly from the inline structure array */
+		*insn++ = BPF_LDX_MEM(BPF_W, si->dst_reg, si->src_reg, off_v6);
 #else
 		*insn++ = BPF_MOV32_IMM(si->dst_reg, 0);
 #endif
 		break;
 	}
-	case bpf_ctx_range_till(struct bpf_sk_lookup,
-				local_ip6[0], local_ip6[3]): {
+	case bpf_ctx_range_till(struct bpf_sk_lookup, local_ip6[0], local_ip6[3]): {
 #if IS_ENABLED(CONFIG_IPV6)
-		int off = si->off;
+		int off_v6 = si->off;
 
-		off -= offsetof(struct bpf_sk_lookup, local_ip6[0]);
-		off += bpf_target_off(struct in6_addr, s6_addr32[0], 4, target_size);
-		*insn++ = BPF_LDX_MEM(BPF_SIZEOF(void *), si->dst_reg, si->src_reg,
-				      offsetof(struct bpf_sk_lookup_kern, v6.daddr));
-		*insn++ = BPF_JMP_IMM(BPF_JEQ, si->dst_reg, 0, 1);
-		*insn++ = BPF_LDX_MEM(BPF_W, si->dst_reg, si->dst_reg, off);
+		/* Calculate exactly where the requested array element sits in the kernel struct */
+		off_v6 -= offsetof(struct bpf_sk_lookup, local_ip6[0]);
+		off_v6 += offsetof(struct bpf_sk_lookup_kern, v6.daddr);
+
+		/* Read the 4-byte chunk directly from the inline structure array */
+		*insn++ = BPF_LDX_MEM(BPF_W, si->dst_reg, si->src_reg, off_v6);
 #else
 		*insn++ = BPF_MOV32_IMM(si->dst_reg, 0);
 #endif
 		break;
 	}
-	case offsetof(struct bpf_sk_lookup, remote_port):
-		*insn++ = BPF_LDX_MEM(BPF_H, si->dst_reg, si->src_reg,
-				      bpf_target_off(struct bpf_sk_lookup_kern,
-						     sport, 2, target_size));
-		break;
-
-	case offsetof(struct bpf_sk_lookup, local_port):
-		*insn++ = BPF_LDX_MEM(BPF_H, si->dst_reg, si->src_reg,
-				      bpf_target_off(struct bpf_sk_lookup_kern,
-						     dport, 2, target_size));
-		break;
 	}
 
 	return insn - insn_buf;
 }
-
 const struct bpf_prog_ops sk_lookup_prog_ops = {
 };
 
