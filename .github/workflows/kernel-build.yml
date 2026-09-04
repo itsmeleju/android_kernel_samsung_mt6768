@@ -48,15 +48,15 @@ jobs:
         id: cache-clang
         with:
           path: clang/
-          key: ${{ runner.os }}-zyc-clang-17.0.0-v1
+          key: ${{ runner.os }}-aosp-clang-r488900-v1
           restore-keys: |
-            ${{ runner.os }}-zyc-clang-17.0.0-
+            ${{ runner.os }}-aosp-clang-r488900-
 
       - name: 📥 Fetch Clang Toolchain
         if: steps.cache-clang.outputs.cache-hit != 'true'
         run: |
           mkdir -p clang
-          wget -q https://github.com/ZyCromerZ/Clang/releases/download/17.0.0-20230911-release/Clang-17.0.0-20230911-release.tar.gz -O clang.tar.gz
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r488900.tar.gz -O clang.tar.gz
           tar -xzf clang.tar.gz -C clang/
           rm clang.tar.gz
 
@@ -70,14 +70,7 @@ jobs:
           # ── Toolchain paths ────────────────────────────────────────────────
           TC_DIR="${GITHUB_WORKSPACE}/clang/bin"
 
-          # System host tools — MUST point to system gcc/ld
-          SYS_GCC=$(which gcc)
-          SYS_GXX=$(which g++)
-          SYS_LD=$(which ld)
-
           echo "[*] Clang Version: $($TC_DIR/clang --version | head -1)"
-          echo "[*] Host GCC:       $SYS_GCC"
-          echo "[*] Host LD:        $SYS_LD"
 
           # ── Optional KernelSU Logic ─────────────────────────────────────────
           KSU_STATUS="${{ inputs.ksu_option }}"
@@ -110,12 +103,9 @@ jobs:
             LLVM_AR="$TC_DIR/llvm-ar"
             LLVM_DIS="$TC_DIR/llvm-dis"
 
-            # Host Tools pointing directly to system binaries
-            HOSTCC="$SYS_GCC"
-            HOSTCXX="$SYS_GXX"
-            HOSTLD="$SYS_LD"
-            HOSTAR="/usr/bin/ar"
-            HOSTSTRIP="/usr/bin/strip"
+            # Host Tools
+            HOSTCC=gcc
+            HOSTCXX=g++
 
             # Cross compile prefixes
             CROSS_COMPILE="aarch64-linux-gnu-"
