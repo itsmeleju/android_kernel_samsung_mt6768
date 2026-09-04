@@ -60,9 +60,10 @@ jobs:
           tar -xzf clang.tar.gz -C clang/
           rm clang.tar.gz
 
-      - name: 📥 Fetch AnyKernel3
+      - name: 🧹 Prepare Existing AnyKernel3 Folder
         run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          echo "[*] Using pre-existing AnyKernel3 directory from repository..."
+          rm -f AnyKernel3/*.zip AnyKernel3/Image* AnyKernel3/dtb* AnyKernel3/dtbo* || true
 
       - name: 🔨 Build AuraX
         shell: bash
