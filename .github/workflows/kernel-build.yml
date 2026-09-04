@@ -37,48 +37,92 @@ jobs:
       - name: ⚙️ Setup Environment
         uses: ./.github/actions/setup-clang
 
-      - name: 🔨 Build Kernel
+     name: 🛠️ Build AuraX Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      ksu_option:
+        description: 'Enable KernelSU Support'
+        required: false
+        default: 'disabled'
+        type: choice
+        options:
+          - enabled
+          - disabled
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 🔍 Checkout Kernel Source
+        uses: actions/checkout@v4
+
+      - name: 🧹 Cleanup Workspace
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/.ghcup
+          sudo apt-get clean
+          echo "[*] Disk space cleaned."
+
+      - name: 📦 Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git build-essential libssl-dev libncurses5-dev libncurses-dev \
+            bison flex libelf-dev bc ccache zip unzip curl wget rsync jq \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+
+      - name: 📥 Fetch Clang Toolchain
+        run: |
+          mkdir -p clang
+          # Replace URL with your preferred Clang/LLVM toolchain tarball if needed
+          wget -q https://github.com/ZyCronite/Clang/releases/download/ZyC-Clang-18.0.0/Clang-18.0.0.tar.gz -O clang.tar.gz
+          tar -xzf clang.tar.gz -C clang/
+          rm clang.tar.gz
+
+      - name: 📥 Fetch AnyKernel3
+        run: |
+          # Replace repository link with your custom device AnyKernel3 tree if required
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+
+      - name: 🔨 Build AuraX
         shell: bash
         run: |
           # ── Toolchain paths ────────────────────────────────────────────────
           TC_DIR="${GITHUB_WORKSPACE}/clang/bin"
 
+          # System host tools — MUST point to system gcc/ld
           SYS_GCC=$(which gcc)
           SYS_GXX=$(which g++)
           SYS_LD=$(which ld)
 
-          echo "[*] Using Clang Version: $($TC_DIR/clang --version | head -n1)"
-          echo "[*] Using Host GCC: $SYS_GCC"
+          echo "[*] Clang Version: $($TC_DIR/clang --version | head -1)"
+          echo "[*] Host GCC:       $SYS_GCC"
+          echo "[*] Host LD:        $SYS_LD"
 
-          # ── Configure KernelSU in Source Files ─────────────────────────────
+          # ── Optional KernelSU Logic ─────────────────────────────────────────
           KSU_STATUS="${{ inputs.ksu_option }}"
-          echo "[*] Processing KernelSU Option: ${KSU_STATUS:-disabled}"
+          echo "[*] KernelSU Option: ${KSU_STATUS:-disabled}"
 
           if [ "$KSU_STATUS" = "enabled" ]; then
-            echo "[*] Enabling KernelSU in drivers/Makefile and drivers/Kconfig..."
-            
-            # Uncomment in drivers/Makefile
-            sed -i 's|^# *obj-$(CONFIG_KSU) *+= *kernelsu/|obj-$(CONFIG_KSU) += kernelsu/|g' drivers/Makefile
-            
-            # Uncomment in drivers/Kconfig
-            sed -i 's|^# *source "drivers/kernelsu/Kconfig"|source "drivers/kernelsu/Kconfig"|g' drivers/Kconfig
-
-          else
-            echo "[*] Disabling KernelSU in drivers/Makefile and drivers/Kconfig..."
-            
-            # Comment out in drivers/Makefile
-            sed -i 's|^obj-$(CONFIG_KSU) *+= *kernelsu/|# obj-$(CONFIG_KSU) += kernelsu/|g' drivers/Makefile
-            
-            # Comment out in drivers/Kconfig
-            sed -i 's|^source "drivers/kernelsu/Kconfig"|# source "drivers/kernelsu/Kconfig"|g' drivers/Kconfig
+            if [ -d "drivers/kernelsu" ]; then
+              echo "[*] Enabling KernelSU in Makefile and Kconfig..."
+              sed -i 's|^# *obj-$(CONFIG_KSU) *+= *kernelsu/|obj-$(CONFIG_KSU) += kernelsu/|g' drivers/Makefile || true
+              sed -i 's|^# *source "drivers/kernelsu/Kconfig"|source "drivers/kernelsu/Kconfig"|g' drivers/Kconfig || true
+            fi
           fi
 
-          # ── Make Arguments ─────────────────────────────────────────────────
+          # ── Comprehensive Make arguments ────────────────────────────────────
           MAKE_ARGS=(
             O=out
             ARCH=arm64
             SUBARCH=arm64
 
+            # Complete Target Toolchain Tools
             CC="$TC_DIR/clang"
             LD="$TC_DIR/ld.lld"
             AR="$TC_DIR/llvm-ar"
@@ -88,28 +132,34 @@ jobs:
             STRIP="$TC_DIR/llvm-strip"
             READELF="$TC_DIR/llvm-readelf"
             OBJSIZE="$TC_DIR/llvm-size"
+            LLVM_AR="$TC_DIR/llvm-ar"
+            LLVM_DIS="$TC_DIR/llvm-dis"
 
+            # Host Tools pointing directly to system binaries
             HOSTCC="$SYS_GCC"
             HOSTCXX="$SYS_GXX"
             HOSTLD="$SYS_LD"
             HOSTAR="/usr/bin/ar"
             HOSTSTRIP="/usr/bin/strip"
 
+            # Cross compile prefixes
             CROSS_COMPILE="aarch64-linux-gnu-"
             CROSS_COMPILE_ARM32="arm-linux-gnueabi-"
             CLANG_TRIPLE="aarch64-linux-gnu-"
 
+            # LLVM flags (Disables integrated assembler for inline asm compatibility)
             LLVM=1
             LLVM_IAS=0
 
-            KCFLAGS="-O2 -Wno-error"
+            # Optimizations and Warning Flags
+            KCFLAGS="-w -pipe -O2 -Wno-error"
             CONFIG_SECTION_MISMATCH_WARN_ONLY=y
           )
 
           mkdir -p out
 
-          # ── Configure & Build ──────────────────────────────────────────────
-          echo "[*] Generating defconfig..."
+          # ── Configure Kernel ────────────────────────────────────────────────
+          echo "[*] Configuring with a32_github_defconfig..."
           make "${MAKE_ARGS[@]}" a32_github_defconfig
 
           if [ "$KSU_STATUS" = "enabled" ]; then
@@ -117,19 +167,35 @@ jobs:
             make "${MAKE_ARGS[@]}" olddefconfig
           fi
 
+          # ── Compilation Process ────────────────────────────────────────────
           JOBS=$(nproc --all)
-          echo "[*] Compiling kernel using $JOBS threads..."
+          echo "[*] Starting compilation with $JOBS threads..."
           make -j"$JOBS" "${MAKE_ARGS[@]}" 2>&1 | tee build.log
+
+          echo "[*] Build completed. Checking output files:"
+          ls -lh out/arch/arm64/boot/ || true
 
       - name: 🛠️ Prepare AnyKernel3
         run: |
-          if [ -d "AnyKernel3" ]; then
-            if [ -f "out/arch/arm64/boot/Image" ]; then
-              cp out/arch/arm64/boot/Image AnyKernel3/
-            fi
-            if [ -f "out/arch/arm64/boot/dtbo.img" ]; then
-              cp out/arch/arm64/boot/dtbo.img AnyKernel3/
-            fi
+          # Copy the compiled kernel image to the AnyKernel3 directory
+          if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
+            cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/Image.gz-dtb
+          elif [ -f out/arch/arm64/boot/Image.gz ]; then
+            cp out/arch/arm64/boot/Image.gz AnyKernel3/Image.gz
+          elif [ -f out/arch/arm64/boot/Image ]; then
+            cp out/arch/arm64/boot/Image AnyKernel3/Image
+          fi
+
+          # Copy DTBO image if generated by the build process
+          if [ -f out/arch/arm64/boot/dtbo.img ]; then
+            cp out/arch/arm64/boot/dtbo.img AnyKernel3/
+          fi
+
+          # Copy DTB image if generated separately
+          if [ -f out/arch/arm64/boot/dtb.img ]; then
+            cp out/arch/arm64/boot/dtb.img AnyKernel3/
+          elif [ -f out/arch/arm64/boot/dtb ]; then
+            cp out/arch/arm64/boot/dtb AnyKernel3/
           fi
 
       - name: 📦 Build AK3 Zip
@@ -143,6 +209,6 @@ jobs:
       - name: 📤 Upload AK3 Zip
         uses: actions/upload-artifact@v4
         with:
-          name: A32-Kernel-${{ github.sha }}
+          name: A32-Kernel-AK3-${{ github.sha }}
           path: A32-Kernel-AK3.zip
           if-no-files-found: error
