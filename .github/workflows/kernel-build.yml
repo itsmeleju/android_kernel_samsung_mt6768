@@ -48,15 +48,17 @@ jobs:
         id: cache-clang
         with:
           path: clang/
-          key: ${{ runner.os }}-zyc-clang-18
+          key: ${{ runner.os }}-zyc-clang-18-v2
           restore-keys: |
-            ${{ runner.os }}-zyc-clang-
+            ${{ runner.os }}-zyc-clang-18-
 
       - name: 📥 Fetch Clang Toolchain
         if: steps.cache-clang.outputs.cache-hit != 'true'
         run: |
           mkdir -p clang
-          wget -q https://github.com/ZyCronite/Clang/releases/download/ZyC-Clang-18.0.0/Clang-18.0.0.tar.gz -O clang.tar.gz
+          # Updated to a valid release URL
+          wget -q https://github.com/ZyCronite/Clang/releases/download/18.0.0/Clang-18.0.0.tar.gz -O clang.tar.gz || \
+          wget -q https://github.com/aosp-realm/clang-releases/releases/download/clang-18.0.0/clang-18.0.0.tar.gz -O clang.tar.gz
           tar -xzf clang.tar.gz -C clang/
           rm clang.tar.gz
 
