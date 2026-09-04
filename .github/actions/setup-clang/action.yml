@@ -1,5 +1,5 @@
 name: 'Setup Clang & Environment'
-description: 'Installs build toolchains and caches Neutron/ZyC Clang'
+description: 'Installs dependencies and prepares Neutron/ZyC Clang'
 runs:
   using: "composite"
   steps:
@@ -13,24 +13,23 @@ runs:
           ca-certificates binutils-aarch64-linux-gnu \
           binutils-arm-linux-gnueabi gcc g++ make zstd jq
 
-    - name: ⚡ Prepare Toolchain (Neutron / ZyC)
+    - name: ⚡ Download / Verify Neutron Clang
       shell: bash
       run: |
         mkdir -p clang
 
         if [ ! -f "clang/bin/clang" ]; then
-          echo "[*] Cache miss or invalid toolchain. Fetching fresh Clang prebuilts..."
+          echo "[*] Cache missed. Downloading fresh Neutron Clang prebuilts..."
           
           RELEASE_JSON=$(curl -sL https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest)
           ASSET_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | endswith(".tar.zst")) | .browser_download_url' | head -n1)
 
           if [ -n "$ASSET_URL" ] && [ "$ASSET_URL" != "null" ]; then
-            echo "[*] Downloading Neutron Clang..."
             wget -q --show-progress --tries=3 "$ASSET_URL" -O clang.tar.zst
             tar -I zstd -xf clang.tar.zst -C clang --strip-components=1
             rm -f clang.tar.zst
           else
-            echo "[!] Neutron Clang unavailable. Fetching ZyC Clang fallback..."
+            echo "[!] Neutron Clang fetch failed, using ZyC Clang fallback..."
             ZYC_JSON=$(curl -sL https://api.github.com/repos/ZyCromerZ/Clang/releases/latest)
             ASSET_URL=$(echo "$ZYC_JSON" | jq -r '.assets[] | select(.name | test("aarch64") and endswith(".tar.gz")) | .browser_download_url' | head -n1)
             
@@ -39,10 +38,10 @@ runs:
             rm -f clang.tar.gz
           fi
         else
-          echo "[*] Valid cached Clang directory restored!"
+          echo "[*] Toolchain loaded directly from GitHub Cache!"
         fi
 
-        echo "[*] Installed Compiler Version:"
+        echo "[*] Active Clang Compiler:"
         clang/bin/clang --version | head -n1
 
         echo "CLANG_DIR=${GITHUB_WORKSPACE}/clang" >> $GITHUB_ENV
