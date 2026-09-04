@@ -68,7 +68,9 @@ jobs:
       - name: 🔨 Build AuraX
         shell: bash
         run: |
-          # ── Toolchain paths ────────────────────────────────────────────────
+          # Ensure host binaries (/usr/bin) are prioritized for HOST tools
+          export PATH="/usr/bin:${GITHUB_WORKSPACE}/clang/bin:${PATH}"
+
           TC_DIR="${GITHUB_WORKSPACE}/clang/bin"
 
           echo "[*] Clang Version: $($TC_DIR/clang --version | head -1)"
@@ -104,16 +106,18 @@ jobs:
             LLVM_AR="$TC_DIR/llvm-ar"
             LLVM_DIS="$TC_DIR/llvm-dis"
 
-            # Host Tools
-            HOSTCC=gcc
-            HOSTCXX=g++
+            # Host Tools (Explicitly pointed to system binaries)
+            HOSTCC=/usr/bin/gcc
+            HOSTCXX=/usr/bin/g++
+            HOSTLD=/usr/bin/ld
+            HOSTAR=/usr/bin/ar
 
             # Cross compile prefixes
             CROSS_COMPILE="aarch64-linux-gnu-"
             CROSS_COMPILE_ARM32="arm-linux-gnueabi-"
             CLANG_TRIPLE="aarch64-linux-gnu-"
 
-            # LLVM flags (Disables integrated assembler for inline asm compatibility)
+            # LLVM flags
             LLVM=1
             LLVM_IAS=0
 
