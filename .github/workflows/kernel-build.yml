@@ -13,43 +13,8 @@ on:
           - 'enabled'
   push:
     branches:
+      - common
       - Github-actions-fix
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: 📥 Checkout Source
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: 🗄️ Cache Toolchain
-        uses: actions/cache@v4
-        id: cache-clang
-        with:
-          path: clang/
-          key: ${{ runner.os }}-neutron-clang-v1
-          restore-keys: |
-            ${{ runner.os }}-neutron-clang-
-
-      - name: ⚙️ Setup Environment
-        uses: ./.github/actions/setup-clang
-
-     name: 🛠️ Build AuraX Kernel
-
-on:
-  workflow_dispatch:
-    inputs:
-      ksu_option:
-        description: 'Enable KernelSU Support'
-        required: false
-        default: 'disabled'
-        type: choice
-        options:
-          - enabled
-          - disabled
 
 jobs:
   build:
@@ -58,6 +23,8 @@ jobs:
     steps:
       - name: 🔍 Checkout Kernel Source
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: 🧹 Cleanup Workspace
         run: |
@@ -76,17 +43,25 @@ jobs:
             bison flex libelf-dev bc ccache zip unzip curl wget rsync jq \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
+      - name: 🗄️ Cache Toolchain
+        uses: actions/cache@v4
+        id: cache-clang
+        with:
+          path: clang/
+          key: ${{ runner.os }}-zyc-clang-18
+          restore-keys: |
+            ${{ runner.os }}-zyc-clang-
+
       - name: 📥 Fetch Clang Toolchain
+        if: steps.cache-clang.outputs.cache-hit != 'true'
         run: |
           mkdir -p clang
-          # Replace URL with your preferred Clang/LLVM toolchain tarball if needed
           wget -q https://github.com/ZyCronite/Clang/releases/download/ZyC-Clang-18.0.0/Clang-18.0.0.tar.gz -O clang.tar.gz
           tar -xzf clang.tar.gz -C clang/
           rm clang.tar.gz
 
       - name: 📥 Fetch AnyKernel3
         run: |
-          # Replace repository link with your custom device AnyKernel3 tree if required
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
 
       - name: 🔨 Build AuraX
