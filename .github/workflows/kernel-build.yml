@@ -2,9 +2,19 @@ name: A32 Kernel Builder by NoobieThingZ
 
 on:
   workflow_dispatch:
+    inputs:
+      ksu_option:
+        description: 'KernelSU / Root Setup Option'
+        required: true
+        default: 'none'
+        type: choice
+        options:
+          - 'none'
+          - 'ksu'
+          - 'susfs'
   push:
     branches:
-      - Github-actions-fix
+      - common
 
 jobs:
   build:
@@ -16,41 +26,38 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: 🗄️ Cache Toolchain
+      - name: 🗄️ Cache Neutron Toolchain
         uses: actions/cache@v4
         id: cache-clang
         with:
           path: clang/
-          # Cache busts only when this workflow file changes
-          key: ${{ runner.os }}-neutron-clang-${{ hashFiles('.github/workflows/kernel-build.yml') }}
+          key: ${{ runner.os }}-neutron-clang-v1
           restore-keys: |
             ${{ runner.os }}-neutron-clang-
 
-      - name: ⚙️ Setup Environment
+      - name: ⚙️ Setup Environment & Clang
         uses: ./.github/actions/setup-clang
 
-      - name: 🔨 Build AuraX
+      - name: 🔨 Build AuraX Kernel
         shell: bash
         run: |
-          # ── Toolchain paths ────────────────────────────────────────────────
-          TC_DIR="${CLANG_DIR}/bin"
+          # ── Toolchain setup ──────────────────────────────────────────────────
+          TC_DIR="${GITHUB_WORKSPACE}/clang/bin"
 
-          # System host tools — MUST point to system gcc/ld, never clang's ld
           SYS_GCC=$(which gcc)
           SYS_GXX=$(which g++)
           SYS_LD=$(which ld)
 
-          echo "[*] Clang:   $($TC_DIR/clang --version | head -1)"
-          echo "[*] Host GCC: $SYS_GCC"
-          echo "[*] Host LD:  $SYS_LD"
+          echo "[*] Using Clang Version: $($TC_DIR/clang --version | head -n1)"
+          echo "[*] Using Host GCC: $SYS_GCC"
 
-          # ── Make arguments ─────────────────────────────────────────────────
+          # ── Build Flags & Toolchain Definitions ──────────────────────────────
           MAKE_ARGS=(
             O=out
             ARCH=arm64
             SUBARCH=arm64
 
-            # Cross compilation target tools
+            # LLVM / Clang Target Tools
             CC="$TC_DIR/clang"
             LD="$TC_DIR/ld.lld"
             AR="$TC_DIR/llvm-ar"
@@ -61,53 +68,74 @@ jobs:
             READELF="$TC_DIR/llvm-readelf"
             OBJSIZE="$TC_DIR/llvm-size"
 
-            # ⚠️ Host tools MUST be system binaries — this is what fixes .relr.dyn
+            # Host Environment Tools (System Binaries)
             HOSTCC="$SYS_GCC"
             HOSTCXX="$SYS_GXX"
             HOSTLD="$SYS_LD"
             HOSTAR="/usr/bin/ar"
             HOSTSTRIP="/usr/bin/strip"
 
-            # Cross compile prefixes (binutils wrappers, not clang ld)
+            # Target Cross-Compiler Prefixes
             CROSS_COMPILE="aarch64-linux-gnu-"
             CROSS_COMPILE_ARM32="arm-linux-gnueabi-"
             CLANG_TRIPLE="aarch64-linux-gnu-"
 
-            # Use LLVM tools for target, but NOT integrated assembler
-            # (many MTK/Samsung kernels have inline asm incompatible with LLVM IAS-noobie)
+            # Assembler Logic (LLVM IAS disabled for legacy MediaTek asm inline compat)
             LLVM=1
             LLVM_IAS=0
 
-            # Suppress known-harmless warnings as errors
-            KCFLAGS="-w -pipe -O2 -Wno-error"
+            # Optimizations and Warnings
+            KCFLAGS="-O2 -Wno-error"
             CONFIG_SECTION_MISMATCH_WARN_ONLY=y
           )
 
           mkdir -p out
 
-          # ── Configure ──────────────────────────────────────────────────────
-          echo "[*] Configuring with a32_github_defconfig..."
+          # ── Defconfig Generation ─────────────────────────────────────────────
+          echo "[*] Generating defconfig..."
           make "${MAKE_ARGS[@]}" a32_github_defconfig
 
-          # ── Build ──────────────────────────────────────────────────────────
-          echo "[*] Starting compilation with $(nproc --all) threads..."
-          make -j$(nproc --all) "${MAKE_ARGS[@]}" 2>&1 | tee build.log
+          # ── Handle KernelSU / SUSFS Choice Input ──────────────────────────────
+          KSU_CHOICE="${{ inputs.ksu_option }}"
+          echo "[*] Selected KernelSU Option: ${KSU_CHOICE:-none}"
 
-          echo "[*] Build complete. Checking for output..."
-          ls -lh out/arch/arm64/boot/ || true
-
-      - name: 🛠️ Prepare AnyKernel3
-        run: |
-          # Copy the compiled kernel image to the AnyKernel3 directory
-          # Note: Depending on your kernel, the file might be 'Image', 'Image.gz', or 'Image.gz-dtb'
-          cp out/arch/arm64/boot/Image AnyKernel3/
-
-          # If your device needs DTBO, copy that as well
-          if [ -f out/arch/arm64/boot/dtbo.img ]; then
-            cp out/arch/arm64/boot/dtbo.img AnyKernel3/
+          if [ "$KSU_CHOICE" = "ksu" ]; then
+            echo "[*] Injecting standard KernelSU configs..."
+            echo "CONFIG_KSU=y" >> out/.config
+          elif [ "$KSU_CHOICE" = "susfs" ]; then
+            echo "[*] Injecting KernelSU + SUSFS configs..."
+            echo "CONFIG_KSU=y" >> out/.config
+            echo "CONFIG_KSU_SUSFS=y" >> out/.config
+            echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> out/.config
           fi
 
-      - name: 📦 Build AK3 Zip
+          if [ "$KSU_CHOICE" != "none" ] && [ -n "$KSU_CHOICE" ]; then
+            make "${MAKE_ARGS[@]}" olddefconfig
+          fi
+
+          # ── Main Compilation Step ───────────────────────────────────────────
+          JOBS=$(nproc --all)
+          echo "[*] Compiling kernel on $JOBS threads..."
+          make -j"$JOBS" "${MAKE_ARGS[@]}" 2>&1 | tee build.log
+
+          echo "[*] Build finished successfully. Checking outputs:"
+          ls -lh out/arch/arm64/boot/ || true
+
+      - name: 🛠️ Prepare AnyKernel3 Output
+        run: |
+          if [ -d "AnyKernel3" ]; then
+            if [ -f "out/arch/arm64/boot/Image" ]; then
+              cp out/arch/arm64/boot/Image AnyKernel3/
+            fi
+            if [ -f "out/arch/arm64/boot/dtbo.img" ]; then
+              cp out/arch/arm64/boot/dtbo.img AnyKernel3/
+            fi
+          else
+            echo "[!] AnyKernel3 directory not found, skipping move."
+          fi
+
+      - name: 📦 Compress AK3 Artifact
+        if: directory_exists == true || hashFiles('AnyKernel3/*') != ''
         run: |
           cd AnyKernel3
           zip -r9 ../A32-Kernel-AK3.zip . \
@@ -115,10 +143,9 @@ jobs:
             -x "*.github*" \
             -x "README.md"
 
-      - name: 📤 Upload AK3 Zip
+      - name: 📤 Upload Flashable Zip Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: A32-Kernel-AK3-${{ github.sha }}
-          path: A32-Kernel-AK3.zip  # <--- This was missing!
-          if-no-files-found: error # Change to error so you know if it failed
-#All good noobie
+          name: A32-Kernel-${{ github.sha }}
+          path: A32-Kernel-AK3.zip
+          if-no-files-found: error
