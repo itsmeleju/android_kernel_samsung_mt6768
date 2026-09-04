@@ -56,7 +56,7 @@ jobs:
         if: steps.cache-clang.outputs.cache-hit != 'true'
         run: |
           mkdir -p clang
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r488900.tar.gz -O clang.tar.gz
+          wget -q https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20260807-release/Clang-16.0.6-20260807.tar.gz -O clang.tar.gz
           tar -xzf clang.tar.gz -C clang/
           rm clang.tar.gz
 
