@@ -2,9 +2,18 @@ name: A32 Kernel Builder by NoobieThingZ
 
 on:
   workflow_dispatch:
+    inputs:
+      ksu_option:
+        description: 'KernelSU / Root Setup Option'
+        required: true
+        default: 'disabled'
+        type: choice
+        options:
+          - 'disabled'
+          - 'enabled'
   push:
     branches:
-      - common
+      - Github-actions-fix
 
 jobs:
   build:
@@ -21,36 +30,55 @@ jobs:
         id: cache-clang
         with:
           path: clang/
-          # Cache busts only when this workflow file changes
-          key: ${{ runner.os }}-neutron-clang-${{ hashFiles('.github/workflows/kernel-build.yml') }}
+          key: ${{ runner.os }}-neutron-clang-v1
           restore-keys: |
             ${{ runner.os }}-neutron-clang-
 
       - name: ⚙️ Setup Environment
         uses: ./.github/actions/setup-clang
 
-      - name: 🔨 Build AuraX
+      - name: 🔨 Build Kernel
         shell: bash
         run: |
           # ── Toolchain paths ────────────────────────────────────────────────
-          TC_DIR="${CLANG_DIR}/bin"
+          TC_DIR="${GITHUB_WORKSPACE}/clang/bin"
 
-          # System host tools — MUST point to system gcc/ld, never clang's ld
           SYS_GCC=$(which gcc)
           SYS_GXX=$(which g++)
           SYS_LD=$(which ld)
 
-          echo "[*] Clang:   $($TC_DIR/clang --version | head -1)"
-          echo "[*] Host GCC: $SYS_GCC"
-          echo "[*] Host LD:  $SYS_LD"
+          echo "[*] Using Clang Version: $($TC_DIR/clang --version | head -n1)"
+          echo "[*] Using Host GCC: $SYS_GCC"
 
-          # ── Make arguments ─────────────────────────────────────────────────
+          # ── Configure KernelSU in Source Files ─────────────────────────────
+          KSU_STATUS="${{ inputs.ksu_option }}"
+          echo "[*] Processing KernelSU Option: ${KSU_STATUS:-disabled}"
+
+          if [ "$KSU_STATUS" = "enabled" ]; then
+            echo "[*] Enabling KernelSU in drivers/Makefile and drivers/Kconfig..."
+            
+            # Uncomment in drivers/Makefile
+            sed -i 's|^# *obj-$(CONFIG_KSU) *+= *kernelsu/|obj-$(CONFIG_KSU) += kernelsu/|g' drivers/Makefile
+            
+            # Uncomment in drivers/Kconfig
+            sed -i 's|^# *source "drivers/kernelsu/Kconfig"|source "drivers/kernelsu/Kconfig"|g' drivers/Kconfig
+
+          else
+            echo "[*] Disabling KernelSU in drivers/Makefile and drivers/Kconfig..."
+            
+            # Comment out in drivers/Makefile
+            sed -i 's|^obj-$(CONFIG_KSU) *+= *kernelsu/|# obj-$(CONFIG_KSU) += kernelsu/|g' drivers/Makefile
+            
+            # Comment out in drivers/Kconfig
+            sed -i 's|^source "drivers/kernelsu/Kconfig"|# source "drivers/kernelsu/Kconfig"|g' drivers/Kconfig
+          fi
+
+          # ── Make Arguments ─────────────────────────────────────────────────
           MAKE_ARGS=(
             O=out
             ARCH=arm64
             SUBARCH=arm64
 
-            # Cross compilation target tools
             CC="$TC_DIR/clang"
             LD="$TC_DIR/ld.lld"
             AR="$TC_DIR/llvm-ar"
@@ -61,50 +89,47 @@ jobs:
             READELF="$TC_DIR/llvm-readelf"
             OBJSIZE="$TC_DIR/llvm-size"
 
-            # ⚠️ Host tools MUST be system binaries — this is what fixes .relr.dyn
             HOSTCC="$SYS_GCC"
             HOSTCXX="$SYS_GXX"
             HOSTLD="$SYS_LD"
             HOSTAR="/usr/bin/ar"
             HOSTSTRIP="/usr/bin/strip"
 
-            # Cross compile prefixes (binutils wrappers, not clang ld)
             CROSS_COMPILE="aarch64-linux-gnu-"
             CROSS_COMPILE_ARM32="arm-linux-gnueabi-"
             CLANG_TRIPLE="aarch64-linux-gnu-"
 
-            # Use LLVM tools for target, but NOT integrated assembler
-            # (many MTK/Samsung kernels have inline asm incompatible with LLVM IAS-noobie)
             LLVM=1
             LLVM_IAS=0
 
-            # Suppress known-harmless warnings as errors
-            KCFLAGS="-w -pipe -O2 -Wno-error"
+            KCFLAGS="-O2 -Wno-error"
             CONFIG_SECTION_MISMATCH_WARN_ONLY=y
           )
 
           mkdir -p out
 
-          # ── Configure ──────────────────────────────────────────────────────
-          echo "[*] Configuring with a32_github_defconfig..."
+          # ── Configure & Build ──────────────────────────────────────────────
+          echo "[*] Generating defconfig..."
           make "${MAKE_ARGS[@]}" a32_github_defconfig
 
-          # ── Build ──────────────────────────────────────────────────────────
-          echo "[*] Starting compilation with $(nproc --all) threads..."
-          make -j$(nproc --all) "${MAKE_ARGS[@]}" 2>&1 | tee build.log
+          if [ "$KSU_STATUS" = "enabled" ]; then
+            echo "CONFIG_KSU=y" >> out/.config
+            make "${MAKE_ARGS[@]}" olddefconfig
+          fi
 
-          echo "[*] Build complete. Checking for output..."
-          ls -lh out/arch/arm64/boot/ || true
+          JOBS=$(nproc --all)
+          echo "[*] Compiling kernel using $JOBS threads..."
+          make -j"$JOBS" "${MAKE_ARGS[@]}" 2>&1 | tee build.log
 
       - name: 🛠️ Prepare AnyKernel3
         run: |
-          # Copy the compiled kernel image to the AnyKernel3 directory
-          # Note: Depending on your kernel, the file might be 'Image', 'Image.gz', or 'Image.gz-dtb'
-          cp out/arch/arm64/boot/Image AnyKernel3/
-
-          # If your device needs DTBO, copy that as well
-          if [ -f out/arch/arm64/boot/dtbo.img ]; then
-            cp out/arch/arm64/boot/dtbo.img AnyKernel3/
+          if [ -d "AnyKernel3" ]; then
+            if [ -f "out/arch/arm64/boot/Image" ]; then
+              cp out/arch/arm64/boot/Image AnyKernel3/
+            fi
+            if [ -f "out/arch/arm64/boot/dtbo.img" ]; then
+              cp out/arch/arm64/boot/dtbo.img AnyKernel3/
+            fi
           fi
 
       - name: 📦 Build AK3 Zip
@@ -118,7 +143,6 @@ jobs:
       - name: 📤 Upload AK3 Zip
         uses: actions/upload-artifact@v4
         with:
-          name: A32-Kernel-AK3-${{ github.sha }}
-          path: A32-Kernel-AK3.zip  # <--- This was missing!
-          if-no-files-found: error # Change to error so you know if it failed
-#All good noobie
+          name: A32-Kernel-${{ github.sha }}
+          path: A32-Kernel-AK3.zip
+          if-no-files-found: error
