@@ -5037,11 +5037,17 @@ static void netif_receive_skb_list_internal(struct list_head *head)
 		preempt_disable();
 		rcu_read_lock();
 		list_for_each_entry_safe(skb, next, head, list) {
+			xdp_prog = rcu_dereference(skb->dev->xdp_prog);
+			skb_list_del_init(skb);
+			if (do_xdp_generic(xdp_prog, skb) == XDP_PASS)
+				list_add_tail(&skb->list, &sublist);
+		}
+		rcu_read_unlock();
+		preempt_enable();
+		/* Put passed packets back on main list */
+		list_splice_init(&sublist, head);
+	}
 
-// ... [lines 5040-5049] ...
-
-static void netif_receive_skb_list_internal(struct list_head *head)
-{
 	rcu_read_lock();
 #ifdef CONFIG_RPS
 	if (static_key_false(&rps_needed)) {
@@ -5057,13 +5063,7 @@ static void netif_receive_skb_list_internal(struct list_head *head)
 		}
 	}
 #endif
-
-	/* SAFE LIST TRAVERSAL: Process remaining skbs individually */
-	list_for_each_entry_safe(skb, next, head, list) {
-		skb_list_del_init(skb);
-		__netif_receive_skb(skb);
-	}
-
+	__netif_receive_skb(head);
 	rcu_read_unlock();
 }
 
