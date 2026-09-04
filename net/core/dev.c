@@ -5033,7 +5033,7 @@ static void netif_receive_skb_list_internal(struct list_head *head)
 	}
 	list_splice_init(&sublist, head);
 
-	if (static_key_false(&generic_xdp_needed_key)) {
+	if (static_key_false(&generic_xdp_needed_key.key)) {
 		preempt_disable();
 		rcu_read_lock();
 		list_for_each_entry_safe(skb, next, head, list) {
@@ -5050,7 +5050,7 @@ static void netif_receive_skb_list_internal(struct list_head *head)
 
 	rcu_read_lock();
 #ifdef CONFIG_RPS
-	if (static_key_false(&rps_needed)) {
+	if (static_key_false(&rps_needed.key)) {
 		list_for_each_entry_safe(skb, next, head, list) {
 			struct rps_dev_flow voidflow, *rflow = &voidflow;
 			int cpu = get_rps_cpu(skb->dev, skb, &rflow);
@@ -5063,7 +5063,12 @@ static void netif_receive_skb_list_internal(struct list_head *head)
 		}
 	}
 #endif
-	__netif_receive_skb(head);
+	/* SAFE LIST TRAVERSAL: Process remaining skbs individually */
+	list_for_each_entry_safe(skb, next, head, list) {
+		skb_list_del_init(skb);
+		__netif_receive_skb(skb);
+	}
+
 	rcu_read_unlock();
 }
 
