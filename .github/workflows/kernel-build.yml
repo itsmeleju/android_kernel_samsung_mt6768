@@ -90,7 +90,7 @@ jobs:
               sed -i 's|^# *source "drivers/kernelsu/Kconfig"|source "drivers/kernelsu/Kconfig"|g' drivers/Kconfig || true
             fi
           else
-            DEFCONFIG_NAME="a32_github_noksu"
+            DEFCONFIG_NAME="a32_noksu_defconfig"
           fi
 
           # ── Comprehensive Make arguments ────────────────────────────────────
