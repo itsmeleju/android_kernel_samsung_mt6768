@@ -11,10 +11,12 @@ on:
         options:
           - 'disabled'
           - 'enabled'
+      localversion:
+        description: 'Custom Localversion (e.g. -NoobieKernel_v1)'
+        required: false
+        default: '-NoobieKernel_v2'
+        type: string
   push:
-    branches:
-      - common
-      - Github-actions-fix
 
 jobs:
   build:
@@ -48,47 +50,46 @@ jobs:
         id: cache-clang
         with:
           path: clang/
-          key: ${{ runner.os }}-zyc-clang-18
+          key: ${{ runner.os }}-aosp-clang-r488900-v1
           restore-keys: |
-            ${{ runner.os }}-zyc-clang-
+            ${{ runner.os }}-aosp-clang-r488900-
 
       - name: 📥 Fetch Clang Toolchain
         if: steps.cache-clang.outputs.cache-hit != 'true'
         run: |
           mkdir -p clang
-          wget -q https://github.com/ZyCronite/Clang/releases/download/ZyC-Clang-18.0.0/Clang-18.0.0.tar.gz -O clang.tar.gz
+          wget -q https://github.com/ZyCromerZ/Clang/releases/download/16.0.6-20260807-release/Clang-16.0.6-20260807.tar.gz -O clang.tar.gz
           tar -xzf clang.tar.gz -C clang/
           rm clang.tar.gz
 
-      - name: 📥 Fetch AnyKernel3
+      - name: 🧹 Prepare Existing AnyKernel3 Folder
         run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          echo "[*] Using pre-existing AnyKernel3 directory from repository..."
+          rm -f AnyKernel3/*.zip AnyKernel3/Image* AnyKernel3/dtb* AnyKernel3/dtbo* || true
 
       - name: 🔨 Build AuraX
         shell: bash
         run: |
-          # ── Toolchain paths ────────────────────────────────────────────────
+          # Ensure host binaries (/usr/bin) are prioritized for HOST tools
+          export PATH="/usr/bin:${GITHUB_WORKSPACE}/clang/bin:${PATH}"
+
           TC_DIR="${GITHUB_WORKSPACE}/clang/bin"
 
-          # System host tools — MUST point to system gcc/ld
-          SYS_GCC=$(which gcc)
-          SYS_GXX=$(which g++)
-          SYS_LD=$(which ld)
-
           echo "[*] Clang Version: $($TC_DIR/clang --version | head -1)"
-          echo "[*] Host GCC:       $SYS_GCC"
-          echo "[*] Host LD:        $SYS_LD"
 
           # ── Optional KernelSU Logic ─────────────────────────────────────────
           KSU_STATUS="${{ inputs.ksu_option }}"
           echo "[*] KernelSU Option: ${KSU_STATUS:-disabled}"
 
           if [ "$KSU_STATUS" = "enabled" ]; then
+            DEFCONFIG_NAME="a32_github_defconfig"
             if [ -d "drivers/kernelsu" ]; then
               echo "[*] Enabling KernelSU in Makefile and Kconfig..."
               sed -i 's|^# *obj-$(CONFIG_KSU) *+= *kernelsu/|obj-$(CONFIG_KSU) += kernelsu/|g' drivers/Makefile || true
               sed -i 's|^# *source "drivers/kernelsu/Kconfig"|source "drivers/kernelsu/Kconfig"|g' drivers/Kconfig || true
             fi
+          else
+            DEFCONFIG_NAME="a32_github_noksu"
           fi
 
           # ── Comprehensive Make arguments ────────────────────────────────────
@@ -110,19 +111,18 @@ jobs:
             LLVM_AR="$TC_DIR/llvm-ar"
             LLVM_DIS="$TC_DIR/llvm-dis"
 
-            # Host Tools pointing directly to system binaries
-            HOSTCC="$SYS_GCC"
-            HOSTCXX="$SYS_GXX"
-            HOSTLD="$SYS_LD"
-            HOSTAR="/usr/bin/ar"
-            HOSTSTRIP="/usr/bin/strip"
+            # Host Tools (Explicitly pointed to system binaries)
+            HOSTCC=/usr/bin/gcc
+            HOSTCXX=/usr/bin/g++
+            HOSTLD=/usr/bin/ld
+            HOSTAR=/usr/bin/ar
 
             # Cross compile prefixes
             CROSS_COMPILE="aarch64-linux-gnu-"
             CROSS_COMPILE_ARM32="arm-linux-gnueabi-"
             CLANG_TRIPLE="aarch64-linux-gnu-"
 
-            # LLVM flags (Disables integrated assembler for inline asm compatibility)
+            # LLVM flags
             LLVM=1
             LLVM_IAS=0
 
@@ -134,13 +134,22 @@ jobs:
           mkdir -p out
 
           # ── Configure Kernel ────────────────────────────────────────────────
-          echo "[*] Configuring with a32_github_defconfig..."
-          make "${MAKE_ARGS[@]}" a32_github_defconfig
+          echo "[*] Configuring with ${DEFCONFIG_NAME}..."
+          make "${MAKE_ARGS[@]}" "${DEFCONFIG_NAME}"
+
+          # ── Configure Localversion & KernelSU ────────────────────────────────
+          LOCALVER="${{ inputs.localversion }}"
+          if [ -n "$LOCALVER" ]; then
+            echo "[*] Setting CONFIG_LOCALVERSION=\"${LOCALVER}\"..."
+            sed -i '/CONFIG_LOCALVERSION=/d' out/.config
+            echo "CONFIG_LOCALVERSION=\"${LOCALVER}\"" >> out/.config
+          fi
 
           if [ "$KSU_STATUS" = "enabled" ]; then
             echo "CONFIG_KSU=y" >> out/.config
-            make "${MAKE_ARGS[@]}" olddefconfig
           fi
+
+          make "${MAKE_ARGS[@]}" olddefconfig
 
           # ── Compilation Process ────────────────────────────────────────────
           JOBS=$(nproc --all)
