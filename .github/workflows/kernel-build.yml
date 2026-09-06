@@ -14,9 +14,8 @@ on:
       localversion:
         description: 'Custom Localversion (e.g. -NoobieKernel_v1)'
         required: false
-        default: '-NoobieKernel_v2'
+        default: '-NoobieKernel_v1'
         type: string
-  push:
 
 jobs:
   build:
@@ -27,6 +26,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+          submodules: recursive
 
       - name: 🧹 Cleanup Workspace
         run: |
@@ -79,7 +79,8 @@ jobs:
 
           # ── Optional KernelSU Logic ─────────────────────────────────────────
           KSU_STATUS="${{ inputs.ksu_option }}"
-          echo "[*] KernelSU Option: ${KSU_STATUS:-disabled}"
+          KSU_STATUS="${KSU_STATUS:-disabled}"
+          echo "[*] KernelSU Option: ${KSU_STATUS}"
 
           if [ "$KSU_STATUS" = "enabled" ]; then
             DEFCONFIG_NAME="a32_github_defconfig"
@@ -139,6 +140,7 @@ jobs:
 
           # ── Configure Localversion & KernelSU ────────────────────────────────
           LOCALVER="${{ inputs.localversion }}"
+          LOCALVER="${LOCALVER:--NoobieKernel_v1}"
           if [ -n "$LOCALVER" ]; then
             echo "[*] Setting CONFIG_LOCALVERSION=\"${LOCALVER}\"..."
             sed -i '/CONFIG_LOCALVERSION=/d' out/.config
