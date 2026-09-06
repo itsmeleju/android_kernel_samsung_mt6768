@@ -1,0 +1,10 @@
+out/
+AnyKernel3/
+build_kernel_noobie.sh.bk
+kernel_noobie_Build.sh
+kernel_noobie_arch.sh
+out_testing/
+KernelSU
+# drivers/kernelsu/
+build.log
+# KernelSU/
