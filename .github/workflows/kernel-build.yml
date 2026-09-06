@@ -22,11 +22,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
-    steps:
-      - name: 🔍 Checkout Kernel Source
+    - name: 🔍 Checkout Kernel Source
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+          submodules: recursive
 
       - name: 🧹 Cleanup Workspace
         run: |
