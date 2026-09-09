@@ -4,7 +4,7 @@
 ### AnyKernel setup
 # global properties
 properties() { '
-kernel.string="AuraX by NoobieThingZ - SAMSUNG_A32"
+kernel.string="NoobieKernel by NoobieThingZ - SAMSUNG_A32"
 do.devicecheck=1
 do.modules=0
 do.systemless=1
