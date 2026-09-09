@@ -554,17 +554,15 @@ fi;
 ui_print " "
 ui_print "  ________________________________ "
 ui_print " |                               |"
-ui_print " |          * AuraX *            |"
+ui_print " |        * NoobieKernel*        |"
 ui_print " |  By NoobieThingZ @ Telegram   |"
 ui_print " |_______________________________|"
 ui_print " "
-ui_print "- Target Device: SAMSUNG Galaxy A32"
+ui_print "- Target Device: SAMSUNG Galaxy A32 4G"
 ui_print "- Build: $(date +%Y-%m-%d)"
 ui_print " "
+ui_print "Kernel recommended for latest ONEUI8 or above"
 ui_print "- Checking device compatibility..."
-
-# Verification logic would go here
-ui_print "- Device verified: SM-A325X";
 
 grep -oE 'AK_BASE.*' META-INF/com/google/android/updater-script >&2;
 ui_print " ";
@@ -578,7 +576,7 @@ do_vendorlevelcheck;
 
 ui_print " "
 ui_print "- Preparing partitions..."
-ui_print "- Flashing AuraX Kernel Image..."
+ui_print "- Flashing NoobieKernel Image..."
 ui_print " "
 ui_print "- Give ur feedback on https://t.me/Bootloopzz"
 ui_print " ";
@@ -603,7 +601,7 @@ fi;
 ui_print " "
 ui_print "  [################################] 100%"
 ui_print " "
-ui_print "- AuraX installation complete!"
+ui_print "- NoobieKernel installation completed!"
 ui_print " "
 ui_print "      --- Reboot and Enjoy! ---"
 ui_print " ";
