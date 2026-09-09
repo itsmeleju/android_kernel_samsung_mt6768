@@ -67,6 +67,24 @@ jobs:
           echo "[*] Using pre-existing AnyKernel3 directory from repository..."
           rm -f AnyKernel3/*.zip AnyKernel3/Image* AnyKernel3/dtb* AnyKernel3/dtbo* || true
 
+ # ── Conditional ReSukiSU Setup (Runs resukisu.yml action) ──
+      - name: Execute ReSukiSU Integration
+        if: ${{ github.event.inputs.ksu_option == 'enabled' }}
+        uses: ./.github/actions/resukisu
+        with:
+          kernel-dir: '.'
+          defconfig-path: 'arch/arm64/configs/a32_github_defconfig'
+
+      # ── Decide Defconfig based on input ──
+      - name: Select Defconfig
+        id: select-config
+        run: |
+          if [ "${{ github.event.inputs.ksu_option }}" = "enabled" ]; then
+            echo "DEFCONFIG_NAME=a32_github_defconfig" >> $GITHUB_ENV
+          else
+            echo "DEFCONFIG_NAME=a32_noksu_defconfig" >> $GITHUB_ENV
+          fi
+
       - name: 🔨 Build AuraX
         shell: bash
         run: |
@@ -76,22 +94,6 @@ jobs:
           TC_DIR="${GITHUB_WORKSPACE}/clang/bin"
 
           echo "[*] Clang Version: $($TC_DIR/clang --version | head -1)"
-
-          # ── Optional KernelSU Logic ─────────────────────────────────────────
-          KSU_STATUS="${{ inputs.ksu_option }}"
-          KSU_STATUS="${KSU_STATUS:-disabled}"
-          echo "[*] KernelSU Option: ${KSU_STATUS}"
-
-          if [ "$KSU_STATUS" = "enabled" ]; then
-            DEFCONFIG_NAME="a32_github_defconfig"
-            if [ -d "drivers/kernelsu" ]; then
-              echo "[*] Enabling KernelSU in Makefile and Kconfig..."
-              sed -i 's|^# *obj-$(CONFIG_KSU) *+= *kernelsu/|obj-$(CONFIG_KSU) += kernelsu/|g' drivers/Makefile || true
-              sed -i 's|^# *source "drivers/kernelsu/Kconfig"|source "drivers/kernelsu/Kconfig"|g' drivers/Kconfig || true
-            fi
-          else
-            DEFCONFIG_NAME="a32_noksu_defconfig"
-          fi
 
           # ── Comprehensive Make arguments ────────────────────────────────────
           MAKE_ARGS=(
