@@ -67,9 +67,9 @@ jobs:
           echo "[*] Using pre-existing AnyKernel3 directory from repository..."
           rm -f AnyKernel3/*.zip AnyKernel3/Image* AnyKernel3/dtb* AnyKernel3/dtbo* || true
 
- # ── Conditional ReSukiSU Setup (Runs resukisu.yml action) ──
+ # ── Conditional ReSukiSU Setup (Runs resukisu action) ──
       - name: Execute ReSukiSU Integration
-        if: ${{ github.event.inputs.ksu_option == 'enabled' }}
+        if: ${{ inputs.ksu_option == 'enabled' }}
         uses: ./.github/actions/resukisu
         with:
           kernel-dir: '.'
@@ -79,12 +79,12 @@ jobs:
       - name: Select Defconfig
         id: select-config
         run: |
-          if [ "${{ github.event.inputs.ksu_option }}" = "enabled" ]; then
-            echo "DEFCONFIG_NAME=a32_github_defconfig" >> $GITHUB_ENV
+          if [ "${{ inputs.ksu_option }}" = "enabled" ]; then
+            echo "DEFCONFIG_NAME=a32_github_defconfig" >> "$GITHUB_ENV"
           else
-            echo "DEFCONFIG_NAME=a32_noksu_defconfig" >> $GITHUB_ENV
+            echo "DEFCONFIG_NAME=a32_noksu_defconfig" >> "$GITHUB_ENV"
           fi
-
+          
       - name: 🔨 Build AuraX
         shell: bash
         run: |
