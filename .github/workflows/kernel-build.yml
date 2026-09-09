@@ -163,7 +163,7 @@ jobs:
           echo "[*] Build completed. Checking output files:"
           ls -lh out/arch/arm64/boot/ || true
 
-            - name: 🛠️ Prepare AnyKernel3
+      - name: 🛠️ Prepare AnyKernel3
         run: |
           # Unzip the AnyKernel3 archive into an AnyKernel3 folder
           unzip -q AnyKernel3.zip -d AnyKernel3
