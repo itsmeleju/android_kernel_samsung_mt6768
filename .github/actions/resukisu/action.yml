@@ -89,12 +89,7 @@ runs:
         if [ -f "$DEFCONFIG_FILE" ]; then
           echo "[*] Appending manual hook configurations to $DEFCONFIG_FILE..."
           sed -i '/CONFIG_KSU/d' "$DEFCONFIG_FILE"
-          cat << 'EOF' >> "$DEFCONFIG_FILE"
-
-# ReSukiSU Manual Hook Configs
-CONFIG_KSU=y
-CONFIG_KSU_MANUAL_HOOK=y
-EOF
+          printf "\n# ReSukiSU Manual Hook Configs\nCONFIG_KSU=y\nCONFIG_KSU_MANUAL_HOOK=y\n" >> "$DEFCONFIG_FILE"
           echo "[✓] Defconfig updated successfully."
         else
           echo "[!] Target defconfig not found at: $DEFCONFIG_FILE"
@@ -103,5 +98,4 @@ EOF
 
         echo "=========================================="
         echo "   ReSukiSU Setup Completed Successfully  "
-        echo "============================
-        =============="
+        echo "=========================================="
