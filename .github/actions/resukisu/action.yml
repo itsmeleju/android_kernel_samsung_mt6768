@@ -7,7 +7,7 @@ inputs:
     required: false
     default: "."
   defconfig-path:
-    description: "Path to target defconfig (e.g. arch/arm64/configs/a32_github_defconfig)"
+    description: "Path to target defconfig relative to kernel-dir (e.g. arch/arm64/configs/a32_github_defconfig)"
     required: true
 
 runs:
@@ -34,7 +34,7 @@ runs:
 
         # 2. Version & Git Commit Check
         echo "[*] Checking ReSukiSU version..."
-        cd drivers/kernelsu
+        pushd drivers/kernelsu > /dev/null
         if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
           RESUKISU_COMMIT=$(git rev-parse --short HEAD)
           RESUKISU_BRANCH=$(git rev-parse --abbrev-ref HEAD)
@@ -47,7 +47,7 @@ runs:
         if [ -f "kernel/ksu.h" ]; then
           grep -E "KSU_VERSION|VERSION" kernel/ksu.h || true
         fi
-        cd "${OLDPWD}"
+        popd > /dev/null
 
         # 3. Manual Hook Verification
         echo "[*] Validating manual hooks in kernel source..."
