@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       ksu_option:
-        description: 'KernelSU / Root Setup Option'
+        description: 'KernelSU / ReSukiSU Setup Option'
         required: true
         default: 'disabled'
         type: choice
