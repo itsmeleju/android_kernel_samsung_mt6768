@@ -163,8 +163,11 @@ jobs:
           echo "[*] Build completed. Checking output files:"
           ls -lh out/arch/arm64/boot/ || true
 
-      - name: 🛠️ Prepare AnyKernel3
+            - name: 🛠️ Prepare AnyKernel3
         run: |
+          # Unzip the AnyKernel3 archive into an AnyKernel3 folder
+          unzip -q AnyKernel3.zip -d AnyKernel3
+
           # Copy the compiled kernel image to the AnyKernel3 directory
           if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
             cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/Image.gz-dtb
@@ -187,9 +190,16 @@ jobs:
           fi
 
       - name: 📦 Build AK3 Zip
+        id: build_zip
         run: |
+          DATE=$(date +'%m%d')
+          LOCAL_VER="${{ inputs.localversion }}"
+          ZIP_NAME="A32-GA-${DATE}-${LOCAL_VER}.zip"
+
+          echo "ZIP_NAME=${ZIP_NAME}" >> "$GITHUB_ENV"
+
           cd AnyKernel3
-          zip -r9 ../A32-Kernel-AK3.zip . \
+          zip -r9 "../${ZIP_NAME}" . \
             -x "*.git*" \
             -x "*.github*" \
             -x "README.md"
@@ -197,6 +207,6 @@ jobs:
       - name: 📤 Upload AK3 Zip
         uses: actions/upload-artifact@v4
         with:
-          name: A32-Kernel-AK3-${{ github.sha }}
-          path: A32-Kernel-AK3.zip
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_NAME }}
           if-no-files-found: error
